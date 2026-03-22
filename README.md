@@ -45,3 +45,45 @@ Após a geração, extraia os arquivos baixados e coloque-os nos diretórios cor
 
 🚨 **Sem esses arquivos, a compilação falhará!** É necessário colocar esses arquivos nos diretórios corretos, conforme a orientação acima.
 
+## 🐳 Rodando com Docker (Linux + X11)
+
+Foi adicionada uma imagem Docker para compilar e executar o exemplo `Hello3D`.
+
+### 1) Build da imagem
+
+```bash
+docker build -t cgcchibrido:hello3d .
+```
+
+### 2) Permitir acesso ao X server (somente para sua sessão local)
+
+```bash
+xhost +SI:localuser:$USER
+```
+
+### 3) Executar a aplicação
+
+```bash
+docker run --rm -it \
+  -e DISPLAY="$DISPLAY" \
+  -e LIBGL_ALWAYS_SOFTWARE=1 \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+  --network host \
+  cgcchibrido:hello3d
+```
+
+### 4) Usando Docker Compose para facilitar
+
+```bash
+export UID=$(id -u)
+export GID=$(id -g)
+docker compose up --build
+```
+
+### 5) Revogar permissão do X server após uso
+
+```bash
+xhost -SI:localuser:$USER
+```
+
+> Observação: a imagem usa renderização por software (`LIBGL_ALWAYS_SOFTWARE=1`) para facilitar compatibilidade em ambientes sem passthrough de GPU.

@@ -1,0 +1,18 @@
+services:
+  hello3d:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cgcchibrido:hello3d
+    environment:
+      DISPLAY: ${DISPLAY}
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    stdin_open: true
+    tty: true
+    command: ./build/Hello3D
+
+

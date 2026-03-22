@@ -17,9 +17,9 @@ FetchContent_Declare(
 
 # Configura o FetchContent para baixar a GLM automaticamente
 FetchContent_Declare(
-        glm
-        GIT_REPOSITORY https://github.com/g-truc/glm.git
-        GIT_TAG master  # Define a versão desejada da GLM
+  glm
+  GIT_REPOSITORY https://github.com/g-truc/glm.git
+  GIT_TAG master  # Define a versão desejada da GLM
 )
 
 # Faz o download e compila as bibliotecas
@@ -57,7 +57,7 @@ set(EXERCISES
     Hello3D
     TriangleTex
     SpherePhong
-   
+
 )
 
 add_compile_options(-Wno-pragmas)
