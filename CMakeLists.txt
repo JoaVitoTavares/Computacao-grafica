@@ -57,6 +57,7 @@ set(EXERCISES
     Hello3D
     TriangleTex
     SpherePhong
+    cuboDesafioModulo2
 
 )
 

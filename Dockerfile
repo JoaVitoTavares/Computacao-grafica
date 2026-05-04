@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcursor-dev \
     libxi-dev \
     libxxf86vm-dev \
+    libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,7 +29,7 @@ RUN cmake -S . -B build \
     -DGLFW_BUILD_EXAMPLES=OFF \
     -DGLFW_BUILD_TESTS=OFF \
     -DGLFW_BUILD_DOCS=OFF \
-    && cmake --build build --target Hello3D -j"$(nproc)"
+    && cmake --build build -j"$(nproc)"
 
 ENV DISPLAY=:0
 CMD ["./build/Hello3D"]
