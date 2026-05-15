@@ -58,6 +58,7 @@ set(EXERCISES
     TriangleTex
     SpherePhong
     cuboDesafioModulo2
+    AtividadeVivencial
 
 )
 
