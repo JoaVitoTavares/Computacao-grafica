@@ -376,9 +376,9 @@ static void applyTransformation(int key, int mods)
         else if (key == GLFW_KEY_X) obj.escala.x += dir * sStp;
         else if (key == GLFW_KEY_Y) obj.escala.y += dir * sStp;
         else if (key == GLFW_KEY_Z) obj.escala.z += dir * sStp;
-        obj.escala.x = max(obj.escala.x, sMin);
-        obj.escala.y = max(obj.escala.y, sMin);
-        obj.escala.z = max(obj.escala.z, sMin);
+        obj.escala.x = std::max(obj.escala.x, sMin);
+        obj.escala.y = std::max(obj.escala.y, sMin);
+        obj.escala.z = std::max(obj.escala.z, sMin);
     }
 }
 
