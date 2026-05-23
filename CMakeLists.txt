@@ -59,6 +59,8 @@ set(EXERCISES
     SpherePhong
     cuboDesafioModulo2
     AtividadeVivencial
+    desafioModulo3
+    vivencial2mod4
 
 )
 
