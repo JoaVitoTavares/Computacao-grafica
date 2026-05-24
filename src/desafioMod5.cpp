@@ -1,16 +1,26 @@
 // =============================================================
 // Desafio Modulo 5 — Camera em Primeira Pessoa
 //
-// Implementa uma camera sintetica com projecao perspectiva e
-// navegacao em 1a pessoa, encapsulada em uma classe Camera, com
-// metodos Mover (WASD) e Rotacionar (mouse), conforme o material
-// de aprofundamento (M5).
+// Camera sintetica com projecao perspectiva e navegacao em 1a
+// pessoa, encapsulada em uma classe Camera com metodos Mover
+// (WASD/QE) e Rotacionar (mouse), conforme o material de
+// aprofundamento (M5).
+//
+// Incorpora as funcionalidades de iluminacao da Vivencial 2 (M4):
+//   - Phong com 3 luzes coloridas posicionadas para revelar
+//     diferentes faces conforme a camera navega:
+//       * Principal (frente, +Z): ilumina o lado de partida da camera
+//       * Preenchimento (lateral, +X): ilumina o lado direito
+//       * Fundo (atras, -Z): ilumina apenas as costas dos objetos
+//   - Toggle individual de cada luz (teclas 1, 2, 3)
+//   - Coeficientes Ka/Kd/Ks (vec3) e Ns lidos do .MTL
 //
 // Controles:
-//   W A S D        — movimenta a camera (frente/tras/esquerda/direita)
-//   Q / E          — desce / sobe (movimento vertical absoluto)
-//   Mouse          — olha ao redor (yaw / pitch)
+//   W A S D        — andar (frente/tras/esquerda/direita)
+//   Q / E          — descer / subir
+//   Mouse          — olhar ao redor (yaw / pitch)
 //   Scroll         — zoom (altera FOV)
+//   1 / 2 / 3      — liga/desliga luz principal / preenchimento / fundo
 //   M              — alterna solido / wireframe
 //   ESC            — fechar
 // =============================================================
@@ -136,8 +146,16 @@ private:
 };
 
 // -------------------------------------------------------------
-// Objeto3D + estado global
+// Estruturas — Material (MTL), Objeto3D, Luz
 // -------------------------------------------------------------
+
+struct MaterialMTL {
+    vec3   Ka    = vec3(0.2f);
+    vec3   Kd    = vec3(0.8f);
+    vec3   Ks    = vec3(0.5f);
+    float  Ns    = 32.0f;
+    string mapKd;
+};
 
 struct Objeto3D {
     GLuint VAO        = 0;
@@ -146,29 +164,46 @@ struct Objeto3D {
     vec3   posicao    = vec3(0.0f);
     vec3   rotacao    = vec3(0.0f);
     vec3   escala     = vec3(1.0f);
-    vec3   cor        = vec3(0.8f);
-    float  Ka         = 0.15f;
-    float  Kd         = 0.7f;
-    float  Ks         = 0.5f;
+    vec3   Ka         = vec3(0.2f);
+    vec3   Kd         = vec3(0.8f);
+    vec3   Ks         = vec3(0.5f);
     float  brilho     = 32.0f;
     GLuint texID      = 0;
     bool   temTextura = false;
 };
 
+struct Luz {
+    vec3 pos;
+    vec3 color;
+    bool ativa = true;
+};
+
+// Tres luzes posicionadas em torno da cena para que cada uma ilumine
+// apenas o seu lado — assim, conforme a camera navega, e possivel ver
+// quais faces estao acesas e quais ficam no escuro.
+//   - Principal:     vem da frente (lado +Z, mesmo lado da camera inicial)
+//   - Preenchimento: vem da lateral (lado +X)
+//   - Fundo:         vem de tras (lado -Z, oposto a camera inicial)
+Luz luzes[3] = {
+    { vec3( 0.0f,  3.0f,  6.0f), vec3(1.0f, 1.0f, 0.95f), true }, // principal (frente, +Z)
+    { vec3( 7.0f,  2.5f,  0.0f), vec3(0.4f, 0.6f, 1.0f),  true }, // preenchimento (lateral, +X)
+    { vec3( 0.0f,  3.0f, -8.0f), vec3(1.0f, 0.8f, 0.5f),  true }, // fundo (atras, -Z)
+};
+
 vector<Objeto3D> objetos;
 bool             modoWireframe = false;
 
-// A camera e o "tempo" precisam ser globais para serem acessados
-// pelos callbacks do GLFW (que sao funcoes livres).
+// A camera e o "tempo" precisam ser globais por causa dos callbacks
+// de GLFW (que sao funcoes livres).
 Camera camera(vec3(0.0f, 1.5f, 7.0f));
-float  deltaTime = 0.0f;
-float  lastFrame = 0.0f;
-float  lastX     = WIDTH  / 2.0f;
-float  lastY     = HEIGHT / 2.0f;
+float  deltaTime  = 0.0f;
+float  lastFrame  = 0.0f;
+float  lastX      = WIDTH  / 2.0f;
+float  lastY      = HEIGHT / 2.0f;
 bool   firstMouse = true;
 
 // -------------------------------------------------------------
-// Shaders — Phong com suporte a textura
+// Shaders — Phong com 3 luzes + textura opcional
 // -------------------------------------------------------------
 
 const char* vertexShaderSrc = R"(
@@ -202,13 +237,16 @@ in vec2 fragUV;
 
 out vec4 corFinal;
 
-uniform vec3  lightPos;
-uniform vec3  viewPos;
-uniform vec3  lightColor;
-uniform vec3  objectColor;
-uniform float Ka;
-uniform float Kd;
-uniform float Ks;
+uniform vec3 viewPos;
+
+// Tres luzes: 0=principal  1=preenchimento  2=fundo
+uniform vec3 lightPos[3];
+uniform vec3 lightColor[3];
+uniform int  lightEnabled[3];
+
+uniform vec3  Ka;
+uniform vec3  Kd;
+uniform vec3  Ks;
 uniform float brilho;
 
 uniform bool      usarTextura;
@@ -216,19 +254,30 @@ uniform sampler2D texDifusa;
 
 void main() {
     vec3 N = normalize(fragNormal);
-    vec3 L = normalize(lightPos - fragPos);
-    vec3 V = normalize(viewPos  - fragPos);
-    vec3 R = reflect(-L, N);
+    vec3 V = normalize(viewPos - fragPos);
 
-    vec3 baseColor = usarTextura ? texture(texDifusa, fragUV).rgb : objectColor;
+    vec3 corDifusa = usarTextura ? texture(texDifusa, fragUV).rgb : Kd;
 
-    vec3  ambient  = Ka * lightColor;
-    float diff     = max(dot(N, L), 0.0);
-    vec3  diffuse  = Kd * diff * lightColor;
-    float spec     = pow(max(dot(V, R), 0.0), brilho);
-    vec3  specular = Ks * spec * lightColor;
+    vec3 resultado = vec3(0.0);
 
-    corFinal = vec4((ambient + diffuse) * baseColor + specular, 1.0);
+    for (int i = 0; i < 3; i++) {
+        if (lightEnabled[i] == 0) continue;
+
+        vec3 L = normalize(lightPos[i] - fragPos);
+        vec3 R = reflect(-L, N);
+
+        vec3  ambiente = Ka * lightColor[i];
+
+        float diff     = max(dot(N, L), 0.0);
+        vec3  difusa   = diff * lightColor[i] * corDifusa;
+
+        float spec     = pow(max(dot(V, R), 0.0), brilho);
+        vec3  especular = Ks * spec * lightColor[i];
+
+        resultado += ambiente * corDifusa + difusa + especular;
+    }
+
+    corFinal = vec4(resultado, 1.0);
 }
 )";
 
@@ -270,7 +319,7 @@ static GLuint criaPrograma() {
 }
 
 // -------------------------------------------------------------
-// Utilitarios de caminho — permite rodar da raiz ou de build/
+// Utilitarios de caminho
 // -------------------------------------------------------------
 
 static bool arquivoExiste(const string& p) {
@@ -291,23 +340,39 @@ static string diretorioDe(const string& p) {
 }
 
 // -------------------------------------------------------------
-// loadMTL / loadTexture / loadSimpleOBJ
-// (mesma logica do desafio do modulo 3)
+// loadMTL — le Ka, Kd, Ks, Ns e map_Kd do arquivo .MTL
 // -------------------------------------------------------------
 
-string loadMTL(string filePath) {
-    ifstream arquivo(filePath);
-    if (!arquivo.is_open()) return "";
-    string linha;
-    while (getline(arquivo, linha)) {
-        istringstream iss(linha);
-        string prefixo; iss >> prefixo;
-        if (prefixo == "map_Kd") { string nome; iss >> nome; return nome; }
+MaterialMTL loadMTL(const string& filePath) {
+    MaterialMTL mat;
+    ifstream arq(filePath);
+    if (!arq.is_open()) {
+        cerr << "Aviso: nao foi possivel abrir MTL: " << filePath << endl;
+        return mat;
     }
-    return "";
+
+    string linha;
+    while (getline(arq, linha)) {
+        if (linha.empty() || linha[0] == '#') continue;
+        istringstream iss(linha);
+        string tag; iss >> tag;
+
+        if (tag == "Ka")        iss >> mat.Ka.r >> mat.Ka.g >> mat.Ka.b;
+        else if (tag == "Kd")   iss >> mat.Kd.r >> mat.Kd.g >> mat.Kd.b;
+        else if (tag == "Ks")   iss >> mat.Ks.r >> mat.Ks.g >> mat.Ks.b;
+        else if (tag == "Ns")   iss >> mat.Ns;
+        else if (tag == "map_Kd") iss >> mat.mapKd;
+    }
+
+    cout << "MTL lido: " << filePath
+         << " | Ka=(" << mat.Ka.r << "," << mat.Ka.g << "," << mat.Ka.b << ")"
+         << " Kd=(" << mat.Kd.r << "," << mat.Kd.g << "," << mat.Kd.b << ")"
+         << " Ks=(" << mat.Ks.r << "," << mat.Ks.g << "," << mat.Ks.b << ")"
+         << " Ns=" << mat.Ns << endl;
+    return mat;
 }
 
-GLuint loadTexture(string filePath) {
+GLuint loadTexture(const string& filePath) {
     GLuint texID;
     glGenTextures(1, &texID);
     glBindTexture(GL_TEXTURE_2D, texID);
@@ -334,9 +399,21 @@ GLuint loadTexture(string filePath) {
     return texID;
 }
 
-int loadSimpleOBJ(string filePath, int &nVertices, string &mtlFilename) {
-    ifstream arquivo(filePath);
-    if (!arquivo.is_open()) {
+// Le apenas a linha "mtllib" do .OBJ para descobrir o .MTL referenciado.
+static string getMTLName(const string& filePath) {
+    ifstream arq(filePath);
+    string linha;
+    while (getline(arq, linha)) {
+        istringstream iss(linha);
+        string tag; iss >> tag;
+        if (tag == "mtllib") { string nome; iss >> nome; return nome; }
+    }
+    return "";
+}
+
+int loadSimpleOBJ(const string& filePath, int& nVertices) {
+    ifstream arq(filePath);
+    if (!arq.is_open()) {
         cerr << "Erro ao tentar ler o arquivo " << filePath << endl;
         return -1;
     }
@@ -345,18 +422,16 @@ int loadSimpleOBJ(string filePath, int &nVertices, string &mtlFilename) {
     vector<vec2>    texCoords;
     vector<vec3>    normals;
     vector<GLfloat> vBuffer;
-    mtlFilename.clear();
 
     string linha;
-    while (getline(arquivo, linha)) {
+    while (getline(arq, linha)) {
         if (linha.empty() || linha[0] == '#') continue;
         istringstream iss(linha);
         string tag; iss >> tag;
 
-        if (tag == "v")        { vec3 v; iss >> v.x >> v.y >> v.z; vertices.push_back(v); }
-        else if (tag == "vt")  { vec2 t; iss >> t.x >> t.y;        texCoords.push_back(t); }
-        else if (tag == "vn")  { vec3 n; iss >> n.x >> n.y >> n.z; normals.push_back(n); }
-        else if (tag == "mtllib") { iss >> mtlFilename; }
+        if (tag == "v")       { vec3 v; iss >> v.x >> v.y >> v.z; vertices.push_back(v); }
+        else if (tag == "vt") { vec2 t; iss >> t.x >> t.y;        texCoords.push_back(t); }
+        else if (tag == "vn") { vec3 n; iss >> n.x >> n.y >> n.z; normals.push_back(n); }
         else if (tag == "f") {
             vector<ivec3> faceVerts;
             string token;
@@ -419,32 +494,41 @@ int loadSimpleOBJ(string filePath, int &nVertices, string &mtlFilename) {
     return (int)VAO;
 }
 
-static Objeto3D criaObjeto(const string& nome, const string& objRel,
-                            vec3 corFallback,
-                            float Ka, float Kd, float Ks, float brilho) {
+// criaObjeto — carrega OBJ + MTL completo (Ka, Kd, Ks, Ns, map_Kd)
+static Objeto3D criaObjeto(const string& nome, const string& objRel) {
     Objeto3D obj;
-    obj.nome = nome; obj.cor = corFallback;
-    obj.Ka = Ka; obj.Kd = Kd; obj.Ks = Ks; obj.brilho = brilho;
+    obj.nome = nome;
 
     string objPath = resolvePath(objRel);
-    int n = 0; string mtlFile;
-    int vao = loadSimpleOBJ(objPath, n, mtlFile);
+    string mtlFile = getMTLName(objPath);
+    int    vao     = loadSimpleOBJ(objPath, obj.nVertices);
     if (vao < 0) return obj;
 
-    obj.VAO = (GLuint)vao; obj.nVertices = n;
+    obj.VAO = (GLuint)vao;
 
     if (!mtlFile.empty()) {
         string dir     = diretorioDe(objPath);
         string mtlPath = dir + mtlFile;
-        string mapKd   = loadMTL(mtlPath);
-        if (!mapKd.empty()) {
-            string texPath = dir + mapKd;
+        MaterialMTL mat = loadMTL(mtlPath);
+
+        obj.Ka     = mat.Ka;
+        obj.Kd     = mat.Kd;
+        obj.Ks     = mat.Ks;
+        obj.brilho = mat.Ns;
+
+        if (!mat.mapKd.empty()) {
+            string texPath = dir + mat.mapKd;
             if (arquivoExiste(texPath)) {
                 obj.texID      = loadTexture(texPath);
                 obj.temTextura = (obj.texID != 0);
+            } else {
+                cerr << "Textura referenciada nao encontrada: " << texPath << endl;
             }
         }
     }
+
+    cout << "Objeto criado: " << nome
+         << " | textura: " << (obj.temTextura ? "sim" : "nao") << endl;
     return obj;
 }
 
@@ -458,6 +542,14 @@ static void key_callback(GLFWwindow* window, int key, int, int action, int) {
         if (key == GLFW_KEY_M) {
             modoWireframe = !modoWireframe;
             cout << (modoWireframe ? "Wireframe" : "Solido") << endl;
+            return;
+        }
+        if (key == GLFW_KEY_1 || key == GLFW_KEY_2 || key == GLFW_KEY_3) {
+            int idx = key - GLFW_KEY_1;
+            luzes[idx].ativa = !luzes[idx].ativa;
+            const char* nomes[] = { "principal", "preenchimento", "fundo" };
+            cout << "Luz " << nomes[idx]
+                 << (luzes[idx].ativa ? ": LIGADA" : ": DESLIGADA") << endl;
         }
     }
 }
@@ -483,7 +575,6 @@ static void framebuffer_callback(GLFWwindow*, int w, int h) {
     glViewport(0, 0, w, h);
 }
 
-// Processa teclas mantidas pressionadas (movimentacao continua).
 static void processarInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.mover(CameraMovement::FORWARD,  deltaTime);
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.mover(CameraMovement::BACKWARD, deltaTime);
@@ -507,7 +598,7 @@ int main() {
 #endif
 
     GLFWwindow* janela = glfwCreateWindow(WIDTH, HEIGHT,
-        "Desafio Modulo 5 - Camera em Primeira Pessoa", nullptr, nullptr);
+        "Desafio Modulo 5 - Camera 1a Pessoa + Phong Multiluz", nullptr, nullptr);
     if (!janela) { glfwTerminate(); return -1; }
 
     glfwMakeContextCurrent(janela);
@@ -515,8 +606,6 @@ int main() {
     glfwSetCursorPosCallback(janela, mouse_callback);
     glfwSetScrollCallback(janela, scroll_callback);
     glfwSetFramebufferSizeCallback(janela, framebuffer_callback);
-
-    // Captura o cursor para a navegacao em 1a pessoa (mouse look).
     glfwSetInputMode(janela, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
@@ -526,30 +615,30 @@ int main() {
 
     cout << "Renderer: " << glGetString(GL_RENDERER) << endl;
     cout << "OpenGL:   " << glGetString(GL_VERSION)  << endl;
-    cout << "\n=== Controles ===" << endl;
+    cout << "\n=========== CONTROLES ===========" << endl;
     cout << "WASD       : mover | Q/E : descer/subir" << endl;
     cout << "Mouse      : olhar ao redor" << endl;
     cout << "Scroll     : zoom (FOV)" << endl;
+    cout << "1/2/3      : luz principal / preenchimento / fundo on-off" << endl;
     cout << "M / ESC    : wireframe / sair" << endl;
+    cout << "=================================" << endl;
 
     GLuint programa = criaPrograma();
     glEnable(GL_DEPTH_TEST);
 
-    // Cena: Suzanne a esquerda, Cubo a direita, outra Suzanne ao fundo.
-    Objeto3D suzanne = criaObjeto("Suzanne", "assets/Modelos3D/Suzanne.obj",
-                                  vec3(0.8f, 0.6f, 0.3f), 0.15f, 0.8f, 0.5f, 32.0f);
-    suzanne.posicao = vec3(-2.0f, 0.0f, 0.0f);
+    // Cena: Suzanne a esquerda, Cubo a direita, Suzanne extra ao fundo.
+    // Material (Ka/Kd/Ks/Ns) lido do .MTL de cada objeto.
+    Objeto3D suzanne = criaObjeto("Suzanne", "assets/Modelos3D/Suzanne.obj");
+    suzanne.posicao  = vec3(-2.0f, 0.0f, 0.0f);
     if (suzanne.VAO) objetos.push_back(suzanne);
 
-    Objeto3D cubo = criaObjeto("Cubo", "assets/Modelos3D/Cube.obj",
-                               vec3(0.4f, 0.7f, 0.9f), 0.15f, 0.7f, 0.6f, 48.0f);
-    cubo.posicao = vec3(2.0f, 0.0f, 0.0f);
+    Objeto3D cubo = criaObjeto("Cubo", "assets/Modelos3D/Cube.obj");
+    cubo.posicao  = vec3(2.0f, 0.0f, 0.0f);
     if (cubo.VAO) objetos.push_back(cubo);
 
-    Objeto3D suzanne2 = criaObjeto("SuzanneFundo", "assets/Modelos3D/Suzanne.obj",
-                                   vec3(0.6f, 0.3f, 0.8f), 0.15f, 0.8f, 0.5f, 32.0f);
-    suzanne2.posicao = vec3(0.0f, 1.0f, -5.0f);
-    if (suzanne2.VAO) objetos.push_back(suzanne2);
+    Objeto3D suzanneFundo = criaObjeto("SuzanneFundo", "assets/Modelos3D/Suzanne.obj");
+    suzanneFundo.posicao  = vec3(0.0f, 1.0f, -5.0f);
+    if (suzanneFundo.VAO) objetos.push_back(suzanneFundo);
 
     if (objetos.empty()) {
         cerr << "Nenhum objeto carregado. Verifique assets/Modelos3D/." << endl;
@@ -558,22 +647,27 @@ int main() {
     }
 
     glUseProgram(programa);
-    const GLint locModel       = glGetUniformLocation(programa, "model");
-    const GLint locView        = glGetUniformLocation(programa, "view");
-    const GLint locProj        = glGetUniformLocation(programa, "proj");
-    const GLint locViewPos     = glGetUniformLocation(programa, "viewPos");
-    const GLint locLightPos    = glGetUniformLocation(programa, "lightPos");
-    const GLint locLightColor  = glGetUniformLocation(programa, "lightColor");
-    const GLint locObjectColor = glGetUniformLocation(programa, "objectColor");
-    const GLint locKa          = glGetUniformLocation(programa, "Ka");
-    const GLint locKd          = glGetUniformLocation(programa, "Kd");
-    const GLint locKs          = glGetUniformLocation(programa, "Ks");
-    const GLint locBrilho      = glGetUniformLocation(programa, "brilho");
-    const GLint locTex         = glGetUniformLocation(programa, "texDifusa");
-    const GLint locUsarTex     = glGetUniformLocation(programa, "usarTextura");
+    const GLint locModel   = glGetUniformLocation(programa, "model");
+    const GLint locView    = glGetUniformLocation(programa, "view");
+    const GLint locProj    = glGetUniformLocation(programa, "proj");
+    const GLint locViewPos = glGetUniformLocation(programa, "viewPos");
+    const GLint locKa      = glGetUniformLocation(programa, "Ka");
+    const GLint locKd      = glGetUniformLocation(programa, "Kd");
+    const GLint locKs      = glGetUniformLocation(programa, "Ks");
+    const GLint locBrilho  = glGetUniformLocation(programa, "brilho");
+    const GLint locTex     = glGetUniformLocation(programa, "texDifusa");
+    const GLint locUsarTex = glGetUniformLocation(programa, "usarTextura");
     glUniform1i(locTex, 0);
 
-    const vec3 lightPos(3.0f, 4.0f, 3.0f);
+    GLint locLightPos[3], locLightColor[3], locLightEnabled[3];
+    for (int i = 0; i < 3; i++) {
+        string lp = "lightPos["     + to_string(i) + "]";
+        string lc = "lightColor["   + to_string(i) + "]";
+        string le = "lightEnabled[" + to_string(i) + "]";
+        locLightPos    [i] = glGetUniformLocation(programa, lp.c_str());
+        locLightColor  [i] = glGetUniformLocation(programa, lc.c_str());
+        locLightEnabled[i] = glGetUniformLocation(programa, le.c_str());
+    }
 
     while (!glfwWindowShouldClose(janela)) {
         float currentFrame = (float)glfwGetTime();
@@ -598,9 +692,13 @@ int main() {
 
         glUniformMatrix4fv(locView, 1, GL_FALSE, value_ptr(view));
         glUniformMatrix4fv(locProj, 1, GL_FALSE, value_ptr(proj));
-        glUniform3fv(locViewPos,    1, value_ptr(camera.Position));
-        glUniform3fv(locLightPos,   1, value_ptr(lightPos));
-        glUniform3f (locLightColor, 1.0f, 1.0f, 1.0f);
+        glUniform3fv(locViewPos, 1, value_ptr(camera.Position));
+
+        for (int i = 0; i < 3; i++) {
+            glUniform3fv(locLightPos    [i], 1, value_ptr(luzes[i].pos));
+            glUniform3fv(locLightColor  [i], 1, value_ptr(luzes[i].color));
+            glUniform1i (locLightEnabled[i], luzes[i].ativa ? 1 : 0);
+        }
 
         for (Objeto3D& obj : objetos) {
             mat4 model(1.0f);
@@ -611,10 +709,9 @@ int main() {
             model = scale(model, obj.escala);
             glUniformMatrix4fv(locModel, 1, GL_FALSE, value_ptr(model));
 
-            glUniform3fv(locObjectColor, 1, value_ptr(obj.cor));
-            glUniform1f (locKa,     obj.Ka);
-            glUniform1f (locKd,     obj.Kd);
-            glUniform1f (locKs,     obj.Ks);
+            glUniform3fv(locKa,     1, value_ptr(obj.Ka));
+            glUniform3fv(locKd,     1, value_ptr(obj.Kd));
+            glUniform3fv(locKs,     1, value_ptr(obj.Ks));
             glUniform1f (locBrilho, obj.brilho);
 
             if (obj.temTextura) {
