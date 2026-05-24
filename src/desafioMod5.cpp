@@ -372,15 +372,22 @@ MaterialMTL loadMTL(const string& filePath) {
     return mat;
 }
 
-GLuint loadTexture(const string& filePath) {
+GLuint loadTexture(const string& filePath, bool pixelArt = false) {
     GLuint texID;
     glGenTextures(1, &texID);
     glBindTexture(GL_TEXTURE_2D, texID);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // Pixel-art (PSX/sprites): nearest, sem mipmap, preserva pixels nitidos.
+    // Outras texturas: filtro linear com mipmap para qualidade.
+    if (pixelArt) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    } else {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
 
     int w, h, canais;
     stbi_set_flip_vertically_on_load(true);
@@ -388,8 +395,9 @@ GLuint loadTexture(const string& filePath) {
     if (data) {
         GLenum formato = (canais == 4) ? GL_RGBA : GL_RGB;
         glTexImage2D(GL_TEXTURE_2D, 0, formato, w, h, 0, formato, GL_UNSIGNED_BYTE, data);
-        glGenerateMipmap(GL_TEXTURE_2D);
-        cout << "Textura carregada: " << filePath << " (" << w << "x" << h << ")" << endl;
+        if (!pixelArt) glGenerateMipmap(GL_TEXTURE_2D);
+        cout << "Textura carregada: " << filePath << " (" << w << "x" << h
+             << (pixelArt ? ", nearest" : "") << ")" << endl;
     } else {
         cerr << "Falha ao carregar textura: " << filePath << endl;
         glDeleteTextures(1, &texID); texID = 0;
@@ -397,6 +405,87 @@ GLuint loadTexture(const string& filePath) {
     stbi_image_free(data);
     glBindTexture(GL_TEXTURE_2D, 0);
     return texID;
+}
+
+// -------------------------------------------------------------
+// criaCuboTexturizado — cubo unitario procedural com UVs (0,0)-(1,1)
+// em cada uma das 6 faces. Permite aplicar uma textura por inteiro
+// em cada lado, em vez do unwrap em cruz usado pelo Cube.obj.
+//
+// Layout do VAO igual ao do loadSimpleOBJ:
+//   pos(3) + normal(3) + uv(2) = 8 floats por vertice, 36 vertices.
+// -------------------------------------------------------------
+
+static GLuint criaCuboTexturizado(int& nVertices) {
+    const float s = 1.0f;
+    // 6 faces × 2 triangulos × 3 vertices, sempre na ordem
+    // (px,py,pz, nx,ny,nz, u,v).
+    const GLfloat verts[] = {
+        // +Z (frente)
+        -s,-s, s,  0,0, 1,  0,0,
+         s,-s, s,  0,0, 1,  1,0,
+         s, s, s,  0,0, 1,  1,1,
+        -s,-s, s,  0,0, 1,  0,0,
+         s, s, s,  0,0, 1,  1,1,
+        -s, s, s,  0,0, 1,  0,1,
+        // -Z (tras)
+         s,-s,-s,  0,0,-1,  0,0,
+        -s,-s,-s,  0,0,-1,  1,0,
+        -s, s,-s,  0,0,-1,  1,1,
+         s,-s,-s,  0,0,-1,  0,0,
+        -s, s,-s,  0,0,-1,  1,1,
+         s, s,-s,  0,0,-1,  0,1,
+        // +X (direita)
+         s,-s, s,  1,0, 0,  0,0,
+         s,-s,-s,  1,0, 0,  1,0,
+         s, s,-s,  1,0, 0,  1,1,
+         s,-s, s,  1,0, 0,  0,0,
+         s, s,-s,  1,0, 0,  1,1,
+         s, s, s,  1,0, 0,  0,1,
+        // -X (esquerda)
+        -s,-s,-s, -1,0, 0,  0,0,
+        -s,-s, s, -1,0, 0,  1,0,
+        -s, s, s, -1,0, 0,  1,1,
+        -s,-s,-s, -1,0, 0,  0,0,
+        -s, s, s, -1,0, 0,  1,1,
+        -s, s,-s, -1,0, 0,  0,1,
+        // +Y (topo)
+        -s, s, s,  0,1, 0,  0,0,
+         s, s, s,  0,1, 0,  1,0,
+         s, s,-s,  0,1, 0,  1,1,
+        -s, s, s,  0,1, 0,  0,0,
+         s, s,-s,  0,1, 0,  1,1,
+        -s, s,-s,  0,1, 0,  0,1,
+        // -Y (base)
+        -s,-s,-s,  0,-1,0,  0,0,
+         s,-s,-s,  0,-1,0,  1,0,
+         s,-s, s,  0,-1,0,  1,1,
+        -s,-s,-s,  0,-1,0,  0,0,
+         s,-s, s,  0,-1,0,  1,1,
+        -s,-s, s,  0,-1,0,  0,1,
+    };
+
+    GLuint VBO, VAO;
+    glGenBuffers(1, &VBO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+
+    glGenVertexArrays(1, &VAO);
+    glBindVertexArray(VAO);
+
+    const GLsizei stride = 8 * sizeof(GLfloat);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (GLvoid*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (GLvoid*)(3 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (GLvoid*)(6 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(2);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    nVertices = sizeof(verts) / sizeof(GLfloat) / 8;
+    return VAO;
 }
 
 // Le apenas a linha "mtllib" do .OBJ para descobrir o .MTL referenciado.
@@ -632,9 +721,21 @@ int main() {
     suzanne.posicao  = vec3(-2.0f, 0.0f, 0.0f);
     if (suzanne.VAO) objetos.push_back(suzanne);
 
-    Objeto3D cubo = criaObjeto("Cubo", "assets/Modelos3D/Cube.obj");
-    cubo.posicao  = vec3(2.0f, 0.0f, 0.0f);
-    if (cubo.VAO) objetos.push_back(cubo);
+    // Cubo procedural com UVs (0,0)-(1,1) em cada face, texturizado com
+    // o primeiro caixote do sprite sheet de Crash Bandicoot. Usa filtro
+    // GL_NEAREST para preservar a aparencia pixel-art original.
+    Objeto3D cubo;
+    cubo.nome    = "CrateCrash";
+    cubo.VAO     = criaCuboTexturizado(cubo.nVertices);
+    cubo.posicao = vec3(2.0f, 0.0f, 0.0f);
+    cubo.Ka      = vec3(1.0f); // textura como cor — sem tingimento
+    cubo.Kd      = vec3(1.0f);
+    cubo.Ks      = vec3(0.3f);
+    cubo.brilho  = 16.0f;
+    string cratePath = resolvePath("assets/tex/CrashCrate.png");
+    cubo.texID      = loadTexture(cratePath, /*pixelArt=*/true);
+    cubo.temTextura = (cubo.texID != 0);
+    objetos.push_back(cubo);
 
     Objeto3D suzanneFundo = criaObjeto("SuzanneFundo", "assets/Modelos3D/Suzanne.obj");
     suzanneFundo.posicao  = vec3(0.0f, 1.0f, -5.0f);
