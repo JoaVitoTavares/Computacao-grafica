@@ -60,6 +60,7 @@ set(EXERCISES
     cuboDesafioModulo2
     AtividadeVivencial
     desafioModulo3
+    desafioMod5
     vivencial2mod4
 
 )
