@@ -252,13 +252,20 @@ uniform float brilho;
 uniform bool      usarTextura;
 uniform sampler2D texDifusa;
 
+// Ambiente global da cena — luz indireta/dispersa, nao pertence a
+// nenhuma luz especifica. Mantida baixa para que cada luz pontual
+// so contribua para a face que ela realmente atinge.
+const vec3 ambienteGlobal = vec3(0.15);
+
 void main() {
     vec3 N = normalize(fragNormal);
     vec3 V = normalize(viewPos - fragPos);
 
     vec3 corDifusa = usarTextura ? texture(texDifusa, fragUV).rgb : Kd;
 
-    vec3 resultado = vec3(0.0);
+    // Ambiente: parcela unica, fora do loop, para nao multiplicar
+    // por cada luz e fazer a luz "de tras" iluminar a frente.
+    vec3 resultado = Ka * ambienteGlobal * corDifusa;
 
     for (int i = 0; i < 3; i++) {
         if (lightEnabled[i] == 0) continue;
@@ -266,15 +273,15 @@ void main() {
         vec3 L = normalize(lightPos[i] - fragPos);
         vec3 R = reflect(-L, N);
 
-        vec3  ambiente = Ka * lightColor[i];
-
+        // Difusa e especular sao direcionais (dependem de N.L / V.R),
+        // entao a luz so contribui na face que ela realmente atinge.
         float diff     = max(dot(N, L), 0.0);
         vec3  difusa   = diff * lightColor[i] * corDifusa;
 
         float spec     = pow(max(dot(V, R), 0.0), brilho);
         vec3  especular = Ks * spec * lightColor[i];
 
-        resultado += ambiente * corDifusa + difusa + especular;
+        resultado += difusa + especular;
     }
 
     corFinal = vec4(resultado, 1.0);
