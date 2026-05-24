@@ -20,7 +20,7 @@ _build/
 _deps/
 glfw-src/
 glfw-build/
-
+.idea/
 # Ignora diretórios com dependências externas baixadas automaticamente pelo FetchContent (stb_image CMake)
 external/
 
