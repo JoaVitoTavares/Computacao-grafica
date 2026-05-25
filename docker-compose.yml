@@ -95,3 +95,19 @@ services:
     stdin_open: true
     tty: true
     command: ./build/vivencial2mod4
+
+  desafiomod6:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cgcchibrido:latest
+    environment:
+      DISPLAY: ${DISPLAY}
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    stdin_open: true
+    tty: true
+    command: ./build/desafioMod6

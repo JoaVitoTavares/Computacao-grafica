@@ -62,6 +62,7 @@ set(EXERCISES
     desafioModulo3
     desafioMod5
     vivencial2mod4
+    desafioMod6
 
 )
 
