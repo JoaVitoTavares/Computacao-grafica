@@ -1,0 +1,15 @@
+# Trajetorias dos objetos da cena (desafioMod5)
+# Formato: <nome_objeto> <x> <y> <z>
+# Linhas iniciando com # ou em branco sao ignoradas.
+# A ordem dos pontos define a sequencia da trajetoria (ciclica: o
+# objeto retorna do ultimo ponto para o primeiro).
+
+# Caixote do Crash Bandicoot — passa pelos lados das tres luzes para
+# poder ver o efeito de iluminacao mudando conforme o objeto se move.
+CrateCrash   2.0  0.0   0.0
+CrateCrash   4.0  1.0  -2.0
+CrateCrash   2.0  2.5  -4.5
+CrateCrash  -1.0  1.5  -4.5
+CrateCrash  -3.5  0.5  -2.0
+CrateCrash  -2.0  0.0   1.0
+CrateCrash   0.0  0.0   2.0
