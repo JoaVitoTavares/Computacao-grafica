@@ -17,11 +17,12 @@
 // A camera continua sendo a classe do M5/M6 (Mover WASD/QE e
 // Rotacionar pelo mouse) e a iluminacao Phong do M4.
 //
-// Manuseio de objetos / trajetorias parametricas (M6): arvores e a
-// lua sao objetos "editaveis" — cada um pode ter uma trajetoria
-// ciclica de pontos de controle percorrida por interpolacao linear.
-// A lua ja vem com uma orbita VERTICAL padrao, contornando o
-// retangulo de terra (sobe por cima e desce por baixo do cenario).
+// Manuseio de objetos / trajetorias parametricas (M6): caixa, arvores
+// e a lua sao objetos "editaveis" — cada um pode ter uma trajetoria
+// ciclica de pontos de controle. A interpolacao e LINEAR por padrao
+// (lua e arvores); a CAIXA do Crash usa uma curva de BEZIER cubica
+// (spline fechada e suave) na sua movimentacao. A lua ja vem com uma
+// orbita VERTICAL padrao, contornando o retangulo de terra.
 //
 // Controles:
 //   W A S D        — andar (frente/tras/esquerda/direita)
@@ -45,6 +46,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <utility>
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -169,15 +171,17 @@ private:
 // -------------------------------------------------------------
 
 // Trajetoria — lista de pontos de controle percorrida ciclicamente
-// por interpolacao linear (segmento por segmento), conforme o M6
-// (Curvas Parametricas). Cada objeto editavel da cena pode ter a
-// sua propria trajetoria, com velocidade ajustavel.
+// (segmento por segmento), conforme o M6 (Curvas Parametricas).
+// Por padrao a interpolacao e LINEAR (grau 1). Com bezier = true,
+// a curva passa a ser uma spline CUBICA DE BEZIER fechada, suave,
+// passando pelos pontos de controle (caixa do Crash).
 struct Trajetoria {
     vector<vec3> pontos;            // pontos de controle (em ordem)
     int          segmento   = 0;    // indice do segmento atual
     float        t          = 0.0f; // parametro [0,1] no segmento
     float        velocidade = 1.5f; // unidades por segundo
     bool         ativa      = true;
+    bool         bezier     = false;// false = linear, true = Bezier cubica
 };
 
 struct Objeto3D {
@@ -194,6 +198,7 @@ struct Objeto3D {
     GLuint texID      = 0;
     bool   temTextura = false;
     bool   editavel   = false;  // true = entra no ciclo de selecao (TAB)
+    vec3   spin       = vec3(0.0f); // rotacao automatica (graus/seg) por eixo
     Trajetoria trajetoria;
 };
 
@@ -223,7 +228,8 @@ const string ARQUIVO_TRAJETORIAS = "assets/trajetorias.txt";
 GLuint programaTraj   = 0;
 GLuint vaoTraj        = 0;
 GLuint vboTraj        = 0;
-int    capacidadeTraj = 0; // numero de vec3 atualmente no VBO
+int    capacidadeTraj = 0;     // numero de vec3 atualmente no VBO
+bool   trajCurva      = false; // VBO atual e uma curva amostrada (Bezier)?
 
 // A camera e o "tempo" precisam ser globais por causa dos callbacks
 // de GLFW (que sao funcoes livres).
@@ -660,14 +666,132 @@ static GLuint criaEsfera(int setores, int pilhas, int& nVertices) {
 }
 
 // -------------------------------------------------------------
+// loadSimpleOBJ — carrega um .OBJ (v / vt / vn / f) para um VAO no
+// mesmo layout dos demais (pos + normal + uv = 8 floats/vertice).
+// Usado para o modelo do macaco (Suzanne).
+// -------------------------------------------------------------
+
+static int loadSimpleOBJ(const string& filePath, int& nVertices) {
+    ifstream arq(filePath);
+    if (!arq.is_open()) {
+        cerr << "Erro ao tentar ler o arquivo " << filePath << endl;
+        return -1;
+    }
+
+    vector<vec3>    vertices;
+    vector<vec2>    texCoords;
+    vector<vec3>    normals;
+    vector<GLfloat> vBuffer;
+
+    string linha;
+    while (getline(arq, linha)) {
+        if (linha.empty() || linha[0] == '#') continue;
+        istringstream iss(linha);
+        string tag; iss >> tag;
+
+        if (tag == "v")       { vec3 v; iss >> v.x >> v.y >> v.z; vertices.push_back(v); }
+        else if (tag == "vt") { vec2 t; iss >> t.x >> t.y;        texCoords.push_back(t); }
+        else if (tag == "vn") { vec3 n; iss >> n.x >> n.y >> n.z; normals.push_back(n); }
+        else if (tag == "f") {
+            vector<ivec3> faceVerts;
+            string token;
+            while (iss >> token) {
+                int vi = 0, ti = 0, ni = 0;
+                size_t b1 = token.find('/');
+                if (b1 == string::npos) {
+                    vi = stoi(token);
+                } else {
+                    vi = stoi(token.substr(0, b1));
+                    size_t b2 = token.find('/', b1 + 1);
+                    if (b2 == string::npos) {
+                        if (b1 + 1 < token.size()) ti = stoi(token.substr(b1 + 1));
+                    } else {
+                        if (b2 > b1 + 1)           ti = stoi(token.substr(b1 + 1, b2 - b1 - 1));
+                        if (b2 + 1 < token.size()) ni = stoi(token.substr(b2 + 1));
+                    }
+                }
+                faceVerts.push_back(ivec3(vi, ti, ni));
+            }
+
+            auto emite = [&](ivec3 idx) {
+                vec3 p = (idx.x > 0) ? vertices [idx.x - 1] : vec3(0.0f);
+                vec2 t = (idx.y > 0) ? texCoords[idx.y - 1] : vec2(0.0f);
+                vec3 n = (idx.z > 0) ? normals  [idx.z - 1] : vec3(0.0f, 1.0f, 0.0f);
+                vBuffer.insert(vBuffer.end(),
+                    { p.x, p.y, p.z, n.x, n.y, n.z, t.x, t.y });
+            };
+
+            // Triangula a face (fan) caso tenha mais de 3 vertices.
+            for (size_t i = 1; i + 1 < faceVerts.size(); ++i) {
+                emite(faceVerts[0]);
+                emite(faceVerts[i]);
+                emite(faceVerts[i + 1]);
+            }
+        }
+    }
+
+    GLuint VBO, VAO;
+    glGenBuffers(1, &VBO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, vBuffer.size() * sizeof(GLfloat),
+                 vBuffer.data(), GL_STATIC_DRAW);
+
+    glGenVertexArrays(1, &VAO);
+    glBindVertexArray(VAO);
+
+    const GLsizei stride = 8 * sizeof(GLfloat);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (GLvoid*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (GLvoid*)(3 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (GLvoid*)(6 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(2);
+
+    nVertices = (int)(vBuffer.size() / 8);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    cout << "OBJ lido: " << filePath << " | vertices=" << nVertices << endl;
+    return (int)VAO;
+}
+
+// -------------------------------------------------------------
 // Trajetorias — manuseio de objetos (M6). Interpolacao linear
 // ciclica entre pontos de controle, edicao em tempo de execucao
 // e persistencia em assets/trajetorias.txt.
 // -------------------------------------------------------------
 
+// Avalia um segmento cubico de Bezier B(t) com 4 pontos de controle:
+//   B(t) = (1-t)^3 P0 + 3(1-t)^2 t P1 + 3(1-t) t^2 P2 + t^3 P3
+static vec3 bezierCubica(const vec3& P0, const vec3& P1,
+                         const vec3& P2, const vec3& P3, float t) {
+    float u  = 1.0f - t;
+    float b0 = u * u * u;
+    float b1 = 3.0f * u * u * t;
+    float b2 = 3.0f * u * t * t;
+    float b3 = t * t * t;
+    return b0 * P0 + b1 * P1 + b2 * P2 + b3 * P3;
+}
+
+// Para uma spline de Bezier FECHADA e suave (C1) passando por todos
+// os pontos de controle, derivamos os dois pontos-guia (handles) de
+// cada segmento a partir dos vizinhos (conversao Catmull-Rom -> Bezier).
+// O segmento i vai do ponto i ao i+1.
+static void handlesBezier(const vector<vec3>& P, int i, vec3& h1, vec3& h2) {
+    int n = (int)P.size();
+    vec3 a0 = P[(i - 1 + n) % n];
+    vec3 a1 = P[i];
+    vec3 a2 = P[(i + 1) % n];
+    vec3 a3 = P[(i + 2) % n];
+    h1 = a1 + (a2 - a0) / 6.0f;
+    h2 = a2 - (a3 - a1) / 6.0f;
+}
+
 // Avanca o parametro t do segmento atual proporcionalmente ao dt e
-// a distancia do segmento (velocidade constante). Ao passar do
-// ultimo ponto, volta ao primeiro (ciclico).
+// ao comprimento do segmento (velocidade ~constante). Ao passar do
+// ultimo ponto, volta ao primeiro (ciclico). A posicao do objeto e
+// obtida por interpolacao LINEAR ou por uma curva de BEZIER cubica,
+// conforme tr.bezier.
 static void atualizaTrajetoria(Objeto3D& obj, float dt) {
     Trajetoria& tr = obj.trajetoria;
     int n = (int)tr.pontos.size();
@@ -694,7 +818,13 @@ static void atualizaTrajetoria(Objeto3D& obj, float dt) {
         p1 = tr.pontos[(tr.segmento + 1) % n];
     }
 
-    obj.posicao = mix(p0, p1, tr.t);
+    if (tr.bezier && n >= 3) {
+        vec3 h1, h2;
+        handlesBezier(tr.pontos, tr.segmento, h1, h2);
+        obj.posicao = bezierCubica(p0, h1, h2, p1, tr.t);
+    } else {
+        obj.posicao = mix(p0, p1, tr.t);
+    }
 }
 
 // (Re)envia os pontos da trajetoria do objeto selecionado ao VBO de
@@ -711,12 +841,32 @@ static void uploadTrajetoriaVBO(const Trajetoria& tr) {
     }
     if (tr.pontos.empty()) { capacidadeTraj = 0; return; }
 
+    // Linear: o VBO recebe os proprios pontos de controle. Bezier: o
+    // VBO recebe a curva AMOSTRADA (varios pontos por segmento), para
+    // a linha desenhada acompanhar a curva suave, e nao o poligono.
+    vector<vec3> dados;
+    trajCurva = (tr.bezier && (int)tr.pontos.size() >= 3);
+    if (trajCurva) {
+        const int n = (int)tr.pontos.size();
+        const int SUB = 20;                 // amostras por segmento
+        for (int i = 0; i < n; i++) {
+            vec3 p0 = tr.pontos[i];
+            vec3 p3 = tr.pontos[(i + 1) % n];
+            vec3 h1, h2;
+            handlesBezier(tr.pontos, i, h1, h2);
+            for (int s = 0; s < SUB; s++)
+                dados.push_back(bezierCubica(p0, h1, h2, p3, (float)s / SUB));
+        }
+    } else {
+        dados = tr.pontos;
+    }
+
     glBindBuffer(GL_ARRAY_BUFFER, vboTraj);
     glBufferData(GL_ARRAY_BUFFER,
-                 tr.pontos.size() * sizeof(vec3),
-                 tr.pontos.data(),
+                 dados.size() * sizeof(vec3),
+                 dados.data(),
                  GL_DYNAMIC_DRAW);
-    capacidadeTraj = (int)tr.pontos.size();
+    capacidadeTraj = (int)dados.size();
 }
 
 // Desenha a trajetoria do objeto selecionado: LINE_LOOP (ciclico)
@@ -732,9 +882,13 @@ static void desenhaTrajetoria(const mat4& view, const mat4& proj) {
         glUniform3f(glGetUniformLocation(programaTraj, "cor"), 1.0f, 0.85f, 0.2f);
         glDrawArrays(GL_LINE_LOOP, 0, capacidadeTraj);
     }
-    glPointSize(10.0f);
-    glUniform3f(glGetUniformLocation(programaTraj, "cor"), 1.0f, 0.2f, 0.8f);
-    glDrawArrays(GL_POINTS, 0, capacidadeTraj);
+    // Marcadores magenta nos pontos de controle (apenas no modo linear;
+    // na curva de Bezier o VBO contem amostras, nao pontos de controle).
+    if (!trajCurva) {
+        glPointSize(10.0f);
+        glUniform3f(glGetUniformLocation(programaTraj, "cor"), 1.0f, 0.2f, 0.8f);
+        glDrawArrays(GL_POINTS, 0, capacidadeTraj);
+    }
     glBindVertexArray(0);
 }
 
@@ -1047,7 +1201,7 @@ int main() {
     cout << "1/2/3      : luz principal / preenchimento / fundo on-off" << endl;
     cout << "M          : wireframe | ESC: sair" << endl;
     cout << "-- Manuseio de objetos (trajetorias) --" << endl;
-    cout << "TAB        : selecionar proximo objeto (arvores / lua)" << endl;
+    cout << "TAB        : selecionar proximo objeto (caixa / arvores / lua)" << endl;
     cout << "N          : modo edicao on/off (cruz central fica roxa)" << endl;
     cout << "P          : adicionar ponto na posicao da camera (modo edicao)" << endl;
     cout << "C          : limpar trajetoria do selecionado" << endl;
@@ -1061,14 +1215,17 @@ int main() {
     glEnable(GL_DEPTH_TEST);
 
     // ---- Recursos compartilhados do cenario ----
-    int    nVertCubo = 0, nVertArv = 0, nVertLua = 0;
+    int    nVertCubo = 0, nVertArv = 0, nVertLua = 0, nVertMacaco = 0;
     GLuint vaoCubo   = criaCuboTexturizado(nVertCubo);
     GLuint vaoArv    = criaArvoreBillboard(/*largura=*/2.4f, /*altura=*/3.6f, nVertArv);
     GLuint vaoLua    = criaEsfera(/*setores=*/48, /*pilhas=*/24, nVertLua);
+    GLuint vaoMacaco = (GLuint)loadSimpleOBJ(resolvePath("assets/Modelos3D/Suzanne.obj"), nVertMacaco);
 
-    GLuint texGrama  = loadTexture(resolvePath("assets/tex/grass.png"), /*pixelArt=*/true);
-    GLuint texArvore = loadTexture(resolvePath("assets/tex/tree.png"),  /*pixelArt=*/true);
-    GLuint texLua    = loadTexture(resolvePath("assets/tex/moon.png"),  /*pixelArt=*/false);
+    GLuint texGrama  = loadTexture(resolvePath("assets/tex/grass.png"),       /*pixelArt=*/true);
+    GLuint texArvore = loadTexture(resolvePath("assets/tex/tree.png"),        /*pixelArt=*/true);
+    GLuint texLua    = loadTexture(resolvePath("assets/tex/moon.png"),        /*pixelArt=*/false);
+    GLuint texCaixa  = loadTexture(resolvePath("assets/tex/CrashCrate.png"),  /*pixelArt=*/true);
+    GLuint texMacaco = loadTexture(resolvePath("assets/Modelos3D/Suzanne.png"),/*pixelArt=*/false);
 
     // ---- Base de blocos de grama ----
     montarChao(vaoCubo, nVertCubo, texGrama);
@@ -1113,18 +1270,82 @@ int main() {
     }
     objetos.push_back(lua);
 
-    // Tenta carregar trajetorias salvas em disco; se nao houver pontos
-    // para a lua no arquivo, mantemos a orbita padrao definida acima.
+    // ---- Caixa do Crash Bandicoot (cubo) em curva de Bezier ----
+    // Reaproveita o VAO do cubo do chao, mas com a textura do caixote.
+    // Sua trajetoria e uma SPLINE CUBICA DE BEZIER fechada (bezier =
+    // true), suave, passando pelos 4 pontos de controle abaixo —
+    // diferente da interpolacao linear usada pela lua e arvores.
+    Objeto3D caixa;
+    caixa.nome       = "caixa";
+    caixa.VAO        = vaoCubo;
+    caixa.nVertices  = nVertCubo;
+    caixa.escala     = vec3(1.0f);
+    caixa.texID      = texCaixa;
+    caixa.temTextura = (texCaixa != 0);
+    caixa.Ks         = vec3(0.1f);
+    caixa.brilho     = 16.0f;
+    caixa.editavel   = true;
+    caixa.trajetoria.bezier     = true;
+    caixa.trajetoria.velocidade = 4.0f;
+    // 4 pontos de controle formando um losango acima do chao; a altura
+    // alterna para a caixa subir e descer ao longo da curva.
+    caixa.trajetoria.pontos = {
+        vec3( 6.0f, 1.5f,  0.0f),
+        vec3( 0.0f, 3.5f,  6.0f),
+        vec3(-6.0f, 1.5f,  0.0f),
+        vec3( 0.0f, 3.5f, -6.0f),
+    };
+    objetos.push_back(caixa);
+
+    // ---- Macaco (Suzanne) girando em orbita vertical LATERAL a da lua ----
+    // A lua orbita no plano YZ (x = 0): vista da camera, sobe/desce no
+    // eixo frente-tras. O macaco orbita no plano XY (z = 0): vista da
+    // camera, sobe pela direita e desce pela esquerda — um caminho
+    // circular vertical em volta da terra, lateral ao da lua (os dois
+    // planos se cruzam so no topo/baixo). Raio menor (110 vs 130) para
+    // nunca coincidir com o caminho da lua. Gira em torno do eixo Y.
+    Objeto3D macaco;
+    macaco.nome       = "macaco";
+    macaco.VAO        = vaoMacaco;
+    macaco.nVertices  = nVertMacaco;
+    macaco.escala     = vec3(12.0f);
+    macaco.texID      = texMacaco;
+    macaco.temTextura = (texMacaco != 0);
+    macaco.Ks         = vec3(0.2f);
+    macaco.brilho     = 32.0f;
+    macaco.editavel   = true;
+    macaco.spin       = vec3(0.0f, 90.0f, 0.0f);  // girante: 90 graus/seg em Y
     {
-        vector<vec3> orbitaPadrao = objetos.back().trajetoria.pontos;
+        const int   N = 16;
+        const float R = 110.0f;   // < 130 da lua (caminho lateral, sem cruzar)
+        for (int i = 0; i < N; i++) {
+            float a = (float)i / N * 2.0f * (float)M_PI;
+            macaco.trajetoria.pontos.push_back(vec3(R * cosf(a), R * sinf(a), 0.0f));
+        }
+        macaco.trajetoria.velocidade = 30.0f;
+    }
+    objetos.push_back(macaco);
+
+    // Tenta carregar trajetorias salvas em disco; para os objetos com
+    // trajetoria padrao (lua, caixa e macaco), se o arquivo nao tiver
+    // pontos deles, mantemos a trajetoria definida acima.
+    {
+        vector<pair<string, vector<vec3>>> padroes;
+        for (const Objeto3D& o : objetos)
+            if (!o.trajetoria.pontos.empty())
+                padroes.push_back({ o.nome, o.trajetoria.pontos });
+
         carregarTrajetorias(ARQUIVO_TRAJETORIAS);
-        if (objetos.back().trajetoria.pontos.empty())
-            objetos.back().trajetoria.pontos = orbitaPadrao;
+
+        for (const auto& pr : padroes)
+            for (Objeto3D& o : objetos)
+                if (o.nome == pr.first && o.trajetoria.pontos.empty())
+                    o.trajetoria.pontos = pr.second;
     }
 
-    // Seleciona a lua como objeto editavel inicial e mostra sua orbita.
+    // Seleciona a caixa como objeto editavel inicial e mostra sua curva.
     for (int i = 0; i < (int)objetos.size(); i++) {
-        if (objetos[i].nome == "lua") { objetoSelecionado = i; break; }
+        if (objetos[i].nome == "caixa") { objetoSelecionado = i; break; }
     }
     uploadTrajetoriaVBO(objetos[objetoSelecionado].trajetoria);
 
@@ -1159,9 +1380,12 @@ int main() {
         glfwPollEvents();
         processarInput(janela);
 
-        // Atualiza a posicao de cada objeto conforme sua trajetoria
-        // (interpolacao linear ciclica entre pontos de controle).
-        for (Objeto3D& obj : objetos) atualizaTrajetoria(obj, deltaTime);
+        // Atualiza a posicao (trajetoria) e a rotacao automatica (spin)
+        // de cada objeto. O macaco, por exemplo, gira enquanto orbita.
+        for (Objeto3D& obj : objetos) {
+            atualizaTrajetoria(obj, deltaTime);
+            obj.rotacao += obj.spin * deltaTime;
+        }
 
         // Fundo padrao (mesmo do desafio do Modulo 6).
         glClearColor(0.08f, 0.08f, 0.12f, 1.0f);
@@ -1229,9 +1453,12 @@ int main() {
     glDeleteVertexArrays(1, &vaoCubo);
     glDeleteVertexArrays(1, &vaoArv);
     glDeleteVertexArrays(1, &vaoLua);
+    glDeleteVertexArrays(1, &vaoMacaco);
     if (texGrama)  glDeleteTextures(1, &texGrama);
     if (texArvore) glDeleteTextures(1, &texArvore);
     if (texLua)    glDeleteTextures(1, &texLua);
+    if (texCaixa)  glDeleteTextures(1, &texCaixa);
+    if (texMacaco) glDeleteTextures(1, &texMacaco);
     if (vboTraj)           glDeleteBuffers(1, &vboTraj);
     if (vaoTraj)           glDeleteVertexArrays(1, &vaoTraj);
     if (programaTraj)      glDeleteProgram(programaTraj);
