@@ -28,7 +28,7 @@
 //   Q / E          — descer / subir
 //   Mouse          — olhar ao redor (yaw / pitch)
 //   Scroll         — zoom (altera FOV)
-//   1 / 2 / 3      — liga/desliga sol / preenchimento / fundo
+//   1 / 2 / 3      — liga/desliga luz principal / preenchimento / fundo
 //   M              — alterna solido / wireframe
 //   TAB            — seleciona o proximo objeto editavel (arvores/lua)
 //   N              — modo edicao on/off (cruz central fica roxa)
@@ -101,7 +101,7 @@ public:
           WorldUp(worldUp),
           Yaw(yaw),
           Pitch(pitch),
-          MovementSpeed(4.0f),
+          MovementSpeed(10.0f),
           MouseSensitivity(0.1f),
           Fov(45.0f)
     {
@@ -193,7 +193,6 @@ struct Objeto3D {
     float  brilho     = 16.0f;
     GLuint texID      = 0;
     bool   temTextura = false;
-    bool   unlit      = false;  // true = exibido sem iluminacao (lua)
     bool   editavel   = false;  // true = entra no ciclo de selecao (TAB)
     Trajetoria trajetoria;
 };
@@ -204,9 +203,10 @@ struct Luz {
     bool ativa = true;
 };
 
-// Tres luzes ao redor do cenario. A "principal" faz o papel de sol.
+// Tres luzes ao redor do cenario. A "principal" (key light) e a luz
+// dominante da cena.
 Luz luzes[3] = {
-    { vec3(  8.0f, 14.0f,  10.0f), vec3(1.0f, 0.97f, 0.85f), true }, // sol (alto, frente)
+    { vec3(  8.0f, 14.0f,  10.0f), vec3(1.0f, 0.97f, 0.85f), true }, // luz principal (alto, frente)
     { vec3(-12.0f,  6.0f,   4.0f), vec3(0.4f, 0.55f, 0.9f),  true }, // preenchimento (ceu, lateral)
     { vec3(  0.0f,  5.0f, -16.0f), vec3(0.9f, 0.7f,  0.5f),  true }, // fundo (atras)
 };
@@ -235,8 +235,8 @@ float  lastY      = HEIGHT / 2.0f;
 bool   firstMouse = true;
 
 // -------------------------------------------------------------
-// Shaders — Phong com 3 luzes + ambiente + textura opcional.
-// Suporta recorte por alpha (arvores) e modo "unlit" (billboard).
+// Shaders — Phong com 3 luzes + textura opcional. Suporta recorte
+// por alpha (arvores) e iluminacao de dois lados (billboards).
 // -------------------------------------------------------------
 
 const char* vertexShaderSrc = R"(
@@ -272,7 +272,7 @@ out vec4 corFinal;
 
 uniform vec3 viewPos;
 
-// Tres luzes: 0=sol  1=preenchimento  2=fundo
+// Tres luzes: 0=principal  1=preenchimento  2=fundo
 uniform vec3 lightPos[3];
 uniform vec3 lightColor[3];
 uniform int  lightEnabled[3];
@@ -284,7 +284,6 @@ uniform float brilho;
 
 uniform bool      usarTextura;
 uniform sampler2D texDifusa;
-uniform bool      unlit;      // lua: exibida com a cor da textura, sem Phong
 
 void main() {
     vec4 amostra = usarTextura ? texture(texDifusa, fragUV) : vec4(Kd, 1.0);
@@ -293,12 +292,6 @@ void main() {
     if (usarTextura && amostra.a < 0.5) discard;
 
     vec3 corDifusa = amostra.rgb;
-
-    // Objeto sem iluminacao (a lua, por enquanto): cor crua da textura.
-    if (unlit) {
-        corFinal = vec4(corDifusa, 1.0);
-        return;
-    }
 
     vec3 N = normalize(fragNormal);
     vec3 V = normalize(viewPos - fragPos);
@@ -316,8 +309,19 @@ void main() {
     for (int i = 0; i < 3; i++) {
         if (lightEnabled[i] == 0) continue;
 
-        vec3 L = normalize(lightPos[i] - fragPos);
-        vec3 R = reflect(-L, N);
+        // Vetor e distancia ate a fonte de luz.
+        vec3  Ldir = lightPos[i] - fragPos;
+        float dist = length(Ldir);
+        vec3  L    = Ldir / dist;          // direcao normalizada
+        vec3  R    = reflect(-L, N);
+
+        // Atenuacao por distancia (point light): a intensidade cai
+        // conforme o ponto se afasta da fonte. Assim cada luz tem um
+        // ALCANCE — perto ilumina com forca maxima, longe quase nao
+        // pega. Como vale para as 3 luzes e usa fragPos/posicao do
+        // objeto, o local e a intensidade da luz no objeto mudam
+        // conforme ele se move pela cena.
+        float atten = 1.0 / (1.0 + 0.014 * dist + 0.0003 * dist * dist);
 
         float diff      = max(dot(N, L), 0.0);
         vec3  difusa    = diff * lightColor[i] * corDifusa;
@@ -325,7 +329,7 @@ void main() {
         float spec      = pow(max(dot(V, R), 0.0), brilho);
         vec3  especular = Ks * spec * lightColor[i];
 
-        resultado += difusa + especular;
+        resultado += (difusa + especular) * atten;
     }
 
     corFinal = vec4(resultado, 1.0);
@@ -550,8 +554,8 @@ static GLuint criaCuboTexturizado(int& nVertices) {
 static GLuint criaArvoreBillboard(float largura, float altura, int& nVertices) {
     const float w = largura * 0.5f;
     const float h = altura;
-    // Normais "para fora" sao irrelevantes (a arvore e unlit), mas
-    // preenchemos com algo coerente por consistencia do layout.
+    // A iluminacao da arvore e de dois lados (a normal e orientada
+    // para o observador no shader), entao basta uma normal coerente.
     const GLfloat verts[] = {
         // Quad A — plano XY (normal +Z)
         -w, 0.0f, 0.0f,  0,0,1,  0,0,
@@ -914,7 +918,7 @@ static void key_callback(GLFWwindow* window, int key, int, int action, int) {
     if (key == GLFW_KEY_1 || key == GLFW_KEY_2 || key == GLFW_KEY_3) {
         int idx = key - GLFW_KEY_1;
         luzes[idx].ativa = !luzes[idx].ativa;
-        const char* nomes[] = { "sol", "preenchimento", "fundo" };
+        const char* nomes[] = { "principal", "preenchimento", "fundo" };
         cout << "Luz " << nomes[idx]
              << (luzes[idx].ativa ? ": LIGADA" : ": DESLIGADA") << endl;
         return;
@@ -1040,7 +1044,7 @@ int main() {
     cout << "\n=========== CONTROLES ===========" << endl;
     cout << "WASD       : mover | Q/E : descer/subir" << endl;
     cout << "Mouse      : olhar ao redor   | Scroll: zoom" << endl;
-    cout << "1/2/3      : sol / preenchimento / fundo on-off" << endl;
+    cout << "1/2/3      : luz principal / preenchimento / fundo on-off" << endl;
     cout << "M          : wireframe | ESC: sair" << endl;
     cout << "-- Manuseio de objetos (trajetorias) --" << endl;
     cout << "TAB        : selecionar proximo objeto (arvores / lua)" << endl;
@@ -1077,7 +1081,12 @@ int main() {
     plantarArvore(vaoArv, nVertArv, texArvore,  0.0f, -5.0f, 1.0f);
     plantarArvore(vaoArv, nVertArv, texArvore, -5.0f,  1.0f, 0.85f);
 
-    // ---- Lua grande e distante no ceu (por enquanto sem iluminacao) ----
+    // ---- Lua grande e distante no ceu ----
+    // Iluminada pelo mesmo Phong da cena: depende das 3 luzes. Com
+    // todas desligadas (1/2/3) a lua fica preta, e o lado iluminado
+    // muda conforme ela percorre a orbita (interage de forma diferente
+    // dependendo de onde esta em relacao a cada luz). Superficie matte
+    // (Ks = 0) para um aspecto fosco, sem brilho especular.
     Objeto3D lua;
     lua.nome       = "lua";
     lua.VAO        = vaoLua;
@@ -1086,7 +1095,7 @@ int main() {
     lua.escala     = vec3(16.0f);     // raio aparente grande no ceu
     lua.texID      = texLua;
     lua.temTextura = (texLua != 0);
-    lua.unlit      = true;            // exibida sem Phong
+    lua.Ks         = vec3(0.0f);      // fosca: sem reflexo especular
     lua.editavel   = true;            // pode ter sua trajetoria editada (TAB/P)
 
     // Trajetoria padrao: orbita VERTICAL contornando o retangulo de
@@ -1130,7 +1139,6 @@ int main() {
     const GLint locBrilho   = glGetUniformLocation(programa, "brilho");
     const GLint locTex      = glGetUniformLocation(programa, "texDifusa");
     const GLint locUsarTex  = glGetUniformLocation(programa, "usarTextura");
-    const GLint locUnlit    = glGetUniformLocation(programa, "unlit");
     glUniform1i(locTex, 0);
 
     GLint locLightPos[3], locLightColor[3], locLightEnabled[3];
@@ -1192,7 +1200,6 @@ int main() {
             glUniform3fv(locKd,     1, value_ptr(obj.Kd));
             glUniform3fv(locKs,     1, value_ptr(obj.Ks));
             glUniform1f (locBrilho, obj.brilho);
-            glUniform1i (locUnlit,  obj.unlit ? 1 : 0);
 
             if (obj.temTextura) {
                 glActiveTexture(GL_TEXTURE0);
