@@ -15,8 +15,13 @@
 //     (assets/tex/tree.png).
 //
 // A camera continua sendo a classe do M5/M6 (Mover WASD/QE e
-// Rotacionar pelo mouse) e a iluminacao Phong do M4, agora com um
-// termo de luz ambiente para dar aparencia de cena externa diurna.
+// Rotacionar pelo mouse) e a iluminacao Phong do M4.
+//
+// Manuseio de objetos / trajetorias parametricas (M6): arvores e a
+// lua sao objetos "editaveis" — cada um pode ter uma trajetoria
+// ciclica de pontos de controle percorrida por interpolacao linear.
+// A lua ja vem com uma orbita VERTICAL padrao, contornando o
+// retangulo de terra (sobe por cima e desce por baixo do cenario).
 //
 // Controles:
 //   W A S D        — andar (frente/tras/esquerda/direita)
@@ -25,6 +30,12 @@
 //   Scroll         — zoom (altera FOV)
 //   1 / 2 / 3      — liga/desliga sol / preenchimento / fundo
 //   M              — alterna solido / wireframe
+//   TAB            — seleciona o proximo objeto editavel (arvores/lua)
+//   N              — modo edicao on/off (cruz central fica roxa)
+//   P              — adiciona ponto na posicao da camera (modo edicao)
+//   C              — limpa a trajetoria do objeto selecionado
+//   T              — pausa / retoma a animacao do selecionado
+//   L / O          — recarrega / salva assets/trajetorias.txt
 //   ESC            — fechar
 // =============================================================
 
@@ -154,8 +165,20 @@ private:
 };
 
 // -------------------------------------------------------------
-// Estruturas — Objeto3D, Luz
+// Estruturas — Trajetoria, Objeto3D, Luz
 // -------------------------------------------------------------
+
+// Trajetoria — lista de pontos de controle percorrida ciclicamente
+// por interpolacao linear (segmento por segmento), conforme o M6
+// (Curvas Parametricas). Cada objeto editavel da cena pode ter a
+// sua propria trajetoria, com velocidade ajustavel.
+struct Trajetoria {
+    vector<vec3> pontos;            // pontos de controle (em ordem)
+    int          segmento   = 0;    // indice do segmento atual
+    float        t          = 0.0f; // parametro [0,1] no segmento
+    float        velocidade = 1.5f; // unidades por segundo
+    bool         ativa      = true;
+};
 
 struct Objeto3D {
     GLuint VAO        = 0;
@@ -170,6 +193,9 @@ struct Objeto3D {
     float  brilho     = 16.0f;
     GLuint texID      = 0;
     bool   temTextura = false;
+    bool   unlit      = false;  // true = exibido sem iluminacao (lua)
+    bool   editavel   = false;  // true = entra no ciclo de selecao (TAB)
+    Trajetoria trajetoria;
 };
 
 struct Luz {
@@ -186,7 +212,18 @@ Luz luzes[3] = {
 };
 
 vector<Objeto3D> objetos;
-bool             modoWireframe = false;
+bool             modoWireframe     = false;
+int              objetoSelecionado = 0;     // indice do objeto editavel atual
+bool             modoEdicao        = false; // adicionar pontos com P (cruz roxa)
+
+// Caminho do arquivo de configuracao de trajetorias.
+const string ARQUIVO_TRAJETORIAS = "assets/trajetorias.txt";
+
+// Recursos do shader de visualizacao da trajetoria (pontos + linhas).
+GLuint programaTraj   = 0;
+GLuint vaoTraj        = 0;
+GLuint vboTraj        = 0;
+int    capacidadeTraj = 0; // numero de vec3 atualmente no VBO
 
 // A camera e o "tempo" precisam ser globais por causa dos callbacks
 // de GLFW (que sao funcoes livres).
@@ -247,7 +284,7 @@ uniform float brilho;
 
 uniform bool      usarTextura;
 uniform sampler2D texDifusa;
-uniform vec3      luzAmbiente;
+uniform bool      unlit;      // lua: exibida com a cor da textura, sem Phong
 
 void main() {
     vec4 amostra = usarTextura ? texture(texDifusa, fragUV) : vec4(Kd, 1.0);
@@ -257,6 +294,12 @@ void main() {
 
     vec3 corDifusa = amostra.rgb;
 
+    // Objeto sem iluminacao (a lua, por enquanto): cor crua da textura.
+    if (unlit) {
+        corFinal = vec4(corDifusa, 1.0);
+        return;
+    }
+
     vec3 N = normalize(fragNormal);
     vec3 V = normalize(viewPos - fragPos);
 
@@ -265,8 +308,10 @@ void main() {
     // o observador para que ambos os lados recebam iluminacao Phong.
     if (dot(N, V) < 0.0) N = -N;
 
-    // Ambiente global para aparencia de cena externa diurna.
-    vec3 resultado = luzAmbiente * corDifusa;
+    // Sem ambiente global (igual ao desafio do Modulo 6): desligar
+    // todas as luzes deixa a cena totalmente preta. Cada luz so
+    // contribui na face que ela atinge.
+    vec3 resultado = vec3(0.0);
 
     for (int i = 0; i < 3; i++) {
         if (lightEnabled[i] == 0) continue;
@@ -298,6 +343,25 @@ void main() {
 )";
 
 const char* fsCrosshair = R"(
+#version 330 core
+uniform vec3 cor;
+out vec4 corFinal;
+void main() { corFinal = vec4(cor, 1.0); }
+)";
+
+// Shader minimalista (sem iluminacao) para desenhar a trajetoria do
+// objeto selecionado — pontos de controle e linhas, em cor uniforme.
+const char* vsTrajetoria = R"(
+#version 330 core
+layout(location = 0) in vec3 posicao;
+uniform mat4 view;
+uniform mat4 proj;
+void main() {
+    gl_Position = proj * view * vec4(posicao, 1.0);
+}
+)";
+
+const char* fsTrajetoria = R"(
 #version 330 core
 uniform vec3 cor;
 out vec4 corFinal;
@@ -529,6 +593,224 @@ static GLuint criaArvoreBillboard(float largura, float altura, int& nVertices) {
 }
 
 // -------------------------------------------------------------
+// criaEsfera — esfera UV (latitude/longitude) de raio 1, gerada
+// proceduralmente. Usada para a lua no ceu. Cada vertice carrega
+// posicao, normal (= posicao normalizada) e coordenada de textura
+// equiretangular (u em longitude, v em latitude).
+//
+// Layout do VAO igual aos demais: pos(3) + normal(3) + uv(2).
+// -------------------------------------------------------------
+
+static GLuint criaEsfera(int setores, int pilhas, int& nVertices) {
+    vector<GLfloat> buf;
+
+    auto vertice = [&](int i, int j) {
+        float v   = (float)i / pilhas;           // 0..1 (polo a polo)
+        float u   = (float)j / setores;          // 0..1 (volta completa)
+        float phi = v * (float)M_PI;             // 0..PI
+        float th  = u * 2.0f * (float)M_PI;       // 0..2PI
+
+        float x = sinf(phi) * cosf(th);
+        float y = cosf(phi);
+        float z = sinf(phi) * sinf(th);
+
+        // pos, normal (mesma direcao do ponto na esfera unitaria), uv
+        buf.insert(buf.end(), { x, y, z,  x, y, z,  u, 1.0f - v });
+    };
+
+    // Dois triangulos por quad (exceto degenerados nos polos).
+    for (int i = 0; i < pilhas; i++) {
+        for (int j = 0; j < setores; j++) {
+            vertice(i,     j);
+            vertice(i + 1, j);
+            vertice(i + 1, j + 1);
+
+            vertice(i,     j);
+            vertice(i + 1, j + 1);
+            vertice(i,     j + 1);
+        }
+    }
+
+    GLuint VBO, VAO;
+    glGenBuffers(1, &VBO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, buf.size() * sizeof(GLfloat),
+                 buf.data(), GL_STATIC_DRAW);
+
+    glGenVertexArrays(1, &VAO);
+    glBindVertexArray(VAO);
+
+    const GLsizei stride = 8 * sizeof(GLfloat);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (GLvoid*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (GLvoid*)(3 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (GLvoid*)(6 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(2);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    nVertices = (int)(buf.size() / 8);
+    return VAO;
+}
+
+// -------------------------------------------------------------
+// Trajetorias — manuseio de objetos (M6). Interpolacao linear
+// ciclica entre pontos de controle, edicao em tempo de execucao
+// e persistencia em assets/trajetorias.txt.
+// -------------------------------------------------------------
+
+// Avanca o parametro t do segmento atual proporcionalmente ao dt e
+// a distancia do segmento (velocidade constante). Ao passar do
+// ultimo ponto, volta ao primeiro (ciclico).
+static void atualizaTrajetoria(Objeto3D& obj, float dt) {
+    Trajetoria& tr = obj.trajetoria;
+    int n = (int)tr.pontos.size();
+    if (!tr.ativa || n < 2) {
+        if (n == 1) obj.posicao = tr.pontos[0];
+        return;
+    }
+
+    vec3 p0 = tr.pontos[tr.segmento];
+    vec3 p1 = tr.pontos[(tr.segmento + 1) % n];
+
+    float dist = length(p1 - p0);
+    if (dist < 1e-5f) {
+        tr.segmento = (tr.segmento + 1) % n;
+        tr.t = 0.0f;
+        return;
+    }
+
+    tr.t += (tr.velocidade * dt) / dist;
+    while (tr.t >= 1.0f) {
+        tr.t -= 1.0f;
+        tr.segmento = (tr.segmento + 1) % n;
+        p0 = tr.pontos[tr.segmento];
+        p1 = tr.pontos[(tr.segmento + 1) % n];
+    }
+
+    obj.posicao = mix(p0, p1, tr.t);
+}
+
+// (Re)envia os pontos da trajetoria do objeto selecionado ao VBO de
+// visualizacao. Chamado quando os pontos ou a selecao mudam.
+static void uploadTrajetoriaVBO(const Trajetoria& tr) {
+    if (vaoTraj == 0) {
+        glGenVertexArrays(1, &vaoTraj);
+        glGenBuffers     (1, &vboTraj);
+        glBindVertexArray(vaoTraj);
+        glBindBuffer(GL_ARRAY_BUFFER, vboTraj);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vec3), (void*)0);
+        glEnableVertexAttribArray(0);
+        glBindVertexArray(0);
+    }
+    if (tr.pontos.empty()) { capacidadeTraj = 0; return; }
+
+    glBindBuffer(GL_ARRAY_BUFFER, vboTraj);
+    glBufferData(GL_ARRAY_BUFFER,
+                 tr.pontos.size() * sizeof(vec3),
+                 tr.pontos.data(),
+                 GL_DYNAMIC_DRAW);
+    capacidadeTraj = (int)tr.pontos.size();
+}
+
+// Desenha a trajetoria do objeto selecionado: LINE_LOOP (ciclico)
+// em amarelo + marcadores magenta nos pontos de controle.
+static void desenhaTrajetoria(const mat4& view, const mat4& proj) {
+    if (capacidadeTraj < 1 || programaTraj == 0) return;
+    glUseProgram(programaTraj);
+    glUniformMatrix4fv(glGetUniformLocation(programaTraj, "view"), 1, GL_FALSE, value_ptr(view));
+    glUniformMatrix4fv(glGetUniformLocation(programaTraj, "proj"), 1, GL_FALSE, value_ptr(proj));
+
+    glBindVertexArray(vaoTraj);
+    if (capacidadeTraj >= 2) {
+        glUniform3f(glGetUniformLocation(programaTraj, "cor"), 1.0f, 0.85f, 0.2f);
+        glDrawArrays(GL_LINE_LOOP, 0, capacidadeTraj);
+    }
+    glPointSize(10.0f);
+    glUniform3f(glGetUniformLocation(programaTraj, "cor"), 1.0f, 0.2f, 0.8f);
+    glDrawArrays(GL_POINTS, 0, capacidadeTraj);
+    glBindVertexArray(0);
+}
+
+// Seleciona o proximo objeto marcado como editavel (ciclico). Pula
+// os 256 blocos de grama, parando apenas em arvores e na lua.
+static void selecionarProximoEditavel() {
+    int n = (int)objetos.size();
+    for (int passo = 1; passo <= n; passo++) {
+        int idx = (objetoSelecionado + passo) % n;
+        if (objetos[idx].editavel) {
+            objetoSelecionado = idx;
+            const Objeto3D& o = objetos[idx];
+            cout << "Selecionado: [" << idx << "] " << o.nome
+                 << " (" << o.trajetoria.pontos.size() << " pontos)" << endl;
+            uploadTrajetoriaVBO(o.trajetoria);
+            return;
+        }
+    }
+}
+
+// Carrega o arquivo de trajetorias e adiciona os pontos aos objetos
+// correspondentes (por nome). Limpa as trajetorias previas antes.
+// Formato: <nome_objeto> <x> <y> <z>  (# = comentario)
+static void carregarTrajetorias(const string& caminho) {
+    for (Objeto3D& o : objetos) {
+        o.trajetoria.pontos.clear();
+        o.trajetoria.segmento = 0;
+        o.trajetoria.t        = 0.0f;
+    }
+
+    string p = resolvePath(caminho);
+    ifstream arq(p);
+    if (!arq.is_open()) {
+        cerr << "Aviso: nao foi possivel abrir " << p << endl;
+        return;
+    }
+
+    int total = 0;
+    string linha;
+    while (getline(arq, linha)) {
+        if (linha.empty() || linha[0] == '#') continue;
+        istringstream iss(linha);
+        string nome; vec3 ponto;
+        if (!(iss >> nome >> ponto.x >> ponto.y >> ponto.z)) continue;
+        for (Objeto3D& o : objetos) {
+            if (o.nome == nome) {
+                o.trajetoria.pontos.push_back(ponto);
+                total++;
+                break;
+            }
+        }
+    }
+    cout << "Trajetorias carregadas: " << total << " pontos de " << p << endl;
+}
+
+// Salva as trajetorias de todos os objetos editaveis no arquivo.
+static void salvarTrajetorias(const string& caminho) {
+    string p = resolvePath(caminho);
+    ofstream arq(p);
+    if (!arq.is_open()) {
+        cerr << "Erro ao salvar trajetorias em " << p << endl;
+        return;
+    }
+
+    arq << "# Trajetorias dos objetos da cena (projetofinal)\n";
+    arq << "# Formato: <nome_objeto> <x> <y> <z>\n\n";
+
+    int total = 0;
+    for (const Objeto3D& o : objetos) {
+        if (o.trajetoria.pontos.empty()) continue;
+        for (const vec3& pt : o.trajetoria.pontos) {
+            arq << o.nome << "  " << pt.x << " " << pt.y << " " << pt.z << "\n";
+            total++;
+        }
+        arq << "\n";
+    }
+    cout << "Trajetorias salvas: " << total << " pontos em " << p << endl;
+}
+
+// -------------------------------------------------------------
 // Cruz central (mira) — overlay de 2 linhas no centro da tela.
 // -------------------------------------------------------------
 
@@ -553,7 +835,9 @@ static void desenhaCrosshair(float aspect) {
     if (programaCrosshair == 0) return;
     glUseProgram(programaCrosshair);
     glUniform1f(glGetUniformLocation(programaCrosshair, "aspect"), aspect);
-    glUniform3f(glGetUniformLocation(programaCrosshair, "cor"), 1.0f, 1.0f, 1.0f);
+    // Roxo em modo edicao, branco em navegacao normal.
+    const vec3 cor = modoEdicao ? vec3(0.7f, 0.2f, 1.0f) : vec3(1.0f);
+    glUniform3fv(glGetUniformLocation(programaCrosshair, "cor"), 1, value_ptr(cor));
     glDisable(GL_DEPTH_TEST);
     glLineWidth(2.0f);
     glBindVertexArray(vaoCrosshair);
@@ -599,14 +883,16 @@ static void montarChao(GLuint vaoCubo, int nVertCubo, GLuint texGrama) {
 // dos blocos (y = 0), na coordenada (x, z) informada.
 static void plantarArvore(GLuint vaoArv, int nVertArv, GLuint texArv,
                           float x, float z, float escala = 1.0f) {
+    static int contador = 0;          // nomes unicos: arvore_0, arvore_1, ...
     Objeto3D arvore;
-    arvore.nome       = "arvore";
+    arvore.nome       = "arvore_" + to_string(contador++);
     arvore.VAO        = vaoArv;
     arvore.nVertices  = nVertArv;
     arvore.posicao    = vec3(x, 0.0f, z);
     arvore.escala     = vec3(escala);
     arvore.texID      = texArv;
     arvore.temTextura = (texArv != 0);
+    arvore.editavel   = true;         // pode receber trajetoria (TAB/P)
     objetos.push_back(arvore);
 }
 
@@ -631,6 +917,61 @@ static void key_callback(GLFWwindow* window, int key, int, int action, int) {
         const char* nomes[] = { "sol", "preenchimento", "fundo" };
         cout << "Luz " << nomes[idx]
              << (luzes[idx].ativa ? ": LIGADA" : ": DESLIGADA") << endl;
+        return;
+    }
+
+    // --- Manuseio de objetos / trajetorias (M6) ---
+    if (objetos.empty()) return;
+
+    if (key == GLFW_KEY_TAB) {
+        selecionarProximoEditavel();
+        return;
+    }
+    if (key == GLFW_KEY_N) {
+        modoEdicao = !modoEdicao;
+        cout << "Modo edicao " << (modoEdicao ? "ATIVADO (cruz roxa)"
+                                              : "DESATIVADO (cruz branca)") << endl;
+        return;
+    }
+    if (key == GLFW_KEY_P) {
+        if (!modoEdicao) {
+            cout << "Para adicionar pontos, ative o modo edicao com N" << endl;
+            return;
+        }
+        Objeto3D& o = objetos[objetoSelecionado];
+        o.trajetoria.pontos.push_back(camera.Position);
+        o.trajetoria.segmento = 0;
+        o.trajetoria.t        = 0.0f;
+        cout << "Ponto adicionado em " << camera.Position.x << ", "
+             << camera.Position.y << ", " << camera.Position.z
+             << " (" << o.nome << " agora tem "
+             << o.trajetoria.pontos.size() << " pontos)" << endl;
+        uploadTrajetoriaVBO(o.trajetoria);
+        return;
+    }
+    if (key == GLFW_KEY_C) {
+        Objeto3D& o = objetos[objetoSelecionado];
+        o.trajetoria.pontos.clear();
+        o.trajetoria.segmento = 0;
+        o.trajetoria.t        = 0.0f;
+        cout << "Trajetoria de " << o.nome << " limpa" << endl;
+        uploadTrajetoriaVBO(o.trajetoria);
+        return;
+    }
+    if (key == GLFW_KEY_T) {
+        Objeto3D& o = objetos[objetoSelecionado];
+        o.trajetoria.ativa = !o.trajetoria.ativa;
+        cout << "Trajetoria de " << o.nome
+             << (o.trajetoria.ativa ? ": REPRODUZINDO" : ": PAUSADA") << endl;
+        return;
+    }
+    if (key == GLFW_KEY_L) {
+        carregarTrajetorias(ARQUIVO_TRAJETORIAS);
+        uploadTrajetoriaVBO(objetos[objetoSelecionado].trajetoria);
+        return;
+    }
+    if (key == GLFW_KEY_O) {
+        salvarTrajetorias(ARQUIVO_TRAJETORIAS);
         return;
     }
 }
@@ -701,19 +1042,29 @@ int main() {
     cout << "Mouse      : olhar ao redor   | Scroll: zoom" << endl;
     cout << "1/2/3      : sol / preenchimento / fundo on-off" << endl;
     cout << "M          : wireframe | ESC: sair" << endl;
+    cout << "-- Manuseio de objetos (trajetorias) --" << endl;
+    cout << "TAB        : selecionar proximo objeto (arvores / lua)" << endl;
+    cout << "N          : modo edicao on/off (cruz central fica roxa)" << endl;
+    cout << "P          : adicionar ponto na posicao da camera (modo edicao)" << endl;
+    cout << "C          : limpar trajetoria do selecionado" << endl;
+    cout << "T          : pausar/retomar animacao do selecionado" << endl;
+    cout << "L / O      : recarregar / salvar assets/trajetorias.txt" << endl;
     cout << "=================================" << endl;
 
     GLuint programa = linkaPrograma(vertexShaderSrc, fragmentShaderSrc);
+    programaTraj    = linkaPrograma(vsTrajetoria, fsTrajetoria);
     inicializaCrosshair();
     glEnable(GL_DEPTH_TEST);
 
     // ---- Recursos compartilhados do cenario ----
-    int    nVertCubo = 0, nVertArv = 0;
+    int    nVertCubo = 0, nVertArv = 0, nVertLua = 0;
     GLuint vaoCubo   = criaCuboTexturizado(nVertCubo);
     GLuint vaoArv    = criaArvoreBillboard(/*largura=*/2.4f, /*altura=*/3.6f, nVertArv);
+    GLuint vaoLua    = criaEsfera(/*setores=*/48, /*pilhas=*/24, nVertLua);
 
     GLuint texGrama  = loadTexture(resolvePath("assets/tex/grass.png"), /*pixelArt=*/true);
     GLuint texArvore = loadTexture(resolvePath("assets/tex/tree.png"),  /*pixelArt=*/true);
+    GLuint texLua    = loadTexture(resolvePath("assets/tex/moon.png"),  /*pixelArt=*/false);
 
     // ---- Base de blocos de grama ----
     montarChao(vaoCubo, nVertCubo, texGrama);
@@ -726,6 +1077,48 @@ int main() {
     plantarArvore(vaoArv, nVertArv, texArvore,  0.0f, -5.0f, 1.0f);
     plantarArvore(vaoArv, nVertArv, texArvore, -5.0f,  1.0f, 0.85f);
 
+    // ---- Lua grande e distante no ceu (por enquanto sem iluminacao) ----
+    Objeto3D lua;
+    lua.nome       = "lua";
+    lua.VAO        = vaoLua;
+    lua.nVertices  = nVertLua;
+    lua.posicao    = vec3(-35.0f, 48.0f, -140.0f);
+    lua.escala     = vec3(16.0f);     // raio aparente grande no ceu
+    lua.texID      = texLua;
+    lua.temTextura = (texLua != 0);
+    lua.unlit      = true;            // exibida sem Phong
+    lua.editavel   = true;            // pode ter sua trajetoria editada (TAB/P)
+
+    // Trajetoria padrao: orbita VERTICAL contornando o retangulo de
+    // terra. Os pontos formam um circulo no plano YZ (x = 0), centrado
+    // na terra (origem) — a lua sobe por cima do cenario e desce por
+    // baixo, dando a volta completa em torno do retangulo de grama.
+    {
+        const int   N = 16;
+        const float R = 130.0f;   // raio da orbita (muito maior que a terra)
+        for (int i = 0; i < N; i++) {
+            float a = (float)i / N * 2.0f * (float)M_PI;
+            lua.trajetoria.pontos.push_back(vec3(0.0f, R * sinf(a), R * cosf(a)));
+        }
+        lua.trajetoria.velocidade = 35.0f;   // ~23 s por volta completa
+    }
+    objetos.push_back(lua);
+
+    // Tenta carregar trajetorias salvas em disco; se nao houver pontos
+    // para a lua no arquivo, mantemos a orbita padrao definida acima.
+    {
+        vector<vec3> orbitaPadrao = objetos.back().trajetoria.pontos;
+        carregarTrajetorias(ARQUIVO_TRAJETORIAS);
+        if (objetos.back().trajetoria.pontos.empty())
+            objetos.back().trajetoria.pontos = orbitaPadrao;
+    }
+
+    // Seleciona a lua como objeto editavel inicial e mostra sua orbita.
+    for (int i = 0; i < (int)objetos.size(); i++) {
+        if (objetos[i].nome == "lua") { objetoSelecionado = i; break; }
+    }
+    uploadTrajetoriaVBO(objetos[objetoSelecionado].trajetoria);
+
     glUseProgram(programa);
     const GLint locModel    = glGetUniformLocation(programa, "model");
     const GLint locView     = glGetUniformLocation(programa, "view");
@@ -737,7 +1130,7 @@ int main() {
     const GLint locBrilho   = glGetUniformLocation(programa, "brilho");
     const GLint locTex      = glGetUniformLocation(programa, "texDifusa");
     const GLint locUsarTex  = glGetUniformLocation(programa, "usarTextura");
-    const GLint locAmbiente = glGetUniformLocation(programa, "luzAmbiente");
+    const GLint locUnlit    = glGetUniformLocation(programa, "unlit");
     glUniform1i(locTex, 0);
 
     GLint locLightPos[3], locLightColor[3], locLightEnabled[3];
@@ -758,6 +1151,10 @@ int main() {
         glfwPollEvents();
         processarInput(janela);
 
+        // Atualiza a posicao de cada objeto conforme sua trajetoria
+        // (interpolacao linear ciclica entre pontos de controle).
+        for (Objeto3D& obj : objetos) atualizaTrajetoria(obj, deltaTime);
+
         // Fundo padrao (mesmo do desafio do Modulo 6).
         glClearColor(0.08f, 0.08f, 0.12f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -775,7 +1172,6 @@ int main() {
         glUniformMatrix4fv(locView, 1, GL_FALSE, value_ptr(view));
         glUniformMatrix4fv(locProj, 1, GL_FALSE, value_ptr(proj));
         glUniform3fv(locViewPos, 1, value_ptr(camera.Position));
-        glUniform3f(locAmbiente, 0.35f, 0.37f, 0.40f);
 
         for (int i = 0; i < 3; i++) {
             glUniform3fv(locLightPos    [i], 1, value_ptr(luzes[i].pos));
@@ -796,6 +1192,7 @@ int main() {
             glUniform3fv(locKd,     1, value_ptr(obj.Kd));
             glUniform3fv(locKs,     1, value_ptr(obj.Ks));
             glUniform1f (locBrilho, obj.brilho);
+            glUniform1i (locUnlit,  obj.unlit ? 1 : 0);
 
             if (obj.temTextura) {
                 glActiveTexture(GL_TEXTURE0);
@@ -810,7 +1207,11 @@ int main() {
             glBindVertexArray(0);
         }
 
-        // Mira central (HUD).
+        // Trajetoria do objeto selecionado por cima da cena (linhas
+        // amarelas + pontos de controle em magenta).
+        desenhaTrajetoria(view, proj);
+
+        // Mira central (HUD). Roxa em modo edicao.
         desenhaCrosshair(aspect);
 
         glfwSwapBuffers(janela);
@@ -820,8 +1221,13 @@ int main() {
     // objetos; apagamos apenas uma vez cada.
     glDeleteVertexArrays(1, &vaoCubo);
     glDeleteVertexArrays(1, &vaoArv);
+    glDeleteVertexArrays(1, &vaoLua);
     if (texGrama)  glDeleteTextures(1, &texGrama);
     if (texArvore) glDeleteTextures(1, &texArvore);
+    if (texLua)    glDeleteTextures(1, &texLua);
+    if (vboTraj)           glDeleteBuffers(1, &vboTraj);
+    if (vaoTraj)           glDeleteVertexArrays(1, &vaoTraj);
+    if (programaTraj)      glDeleteProgram(programaTraj);
     if (vboCrosshair)      glDeleteBuffers(1, &vboCrosshair);
     if (vaoCrosshair)      glDeleteVertexArrays(1, &vaoCrosshair);
     if (programaCrosshair) glDeleteProgram(programaCrosshair);
