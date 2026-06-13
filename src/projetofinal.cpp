@@ -32,6 +32,8 @@
 //   1 / 2 / 3      — liga/desliga luz principal / preenchimento / fundo
 //   M              — alterna solido / wireframe
 //   TAB            — seleciona o proximo objeto editavel (arvores/lua)
+//   R / G / K      — modo manual ROTACAO / TRANSLACAO / ESCALA (Modulo 3);
+//                    X/Y/Z aplicam no eixo (Shift = negativo), +/- escala
 //   N              — modo edicao on/off (cruz central fica roxa)
 //   P              — adiciona ponto na posicao da camera (modo edicao)
 //   C              — limpa a trajetoria do objeto selecionado
@@ -220,6 +222,13 @@ vector<Objeto3D> objetos;
 bool             modoWireframe     = false;
 int              objetoSelecionado = 0;     // indice do objeto editavel atual
 bool             modoEdicao        = false; // adicionar pontos com P (cruz roxa)
+
+// Manuseio manual do objeto selecionado (portado do Desafio do Modulo 3):
+// alem da trajetoria automatica, o objeto pode ser transladado, ROTACIONADO
+// ou escalado a mao. R/G/K escolhem o modo; X/Y/Z aplicam no eixo (Shift
+// inverte o sentido); +/- escalam de forma uniforme.
+enum class ModoTransformacao { NENHUM, TRANSLACAO, ROTACAO, ESCALA };
+ModoTransformacao modoTransform = ModoTransformacao::NENHUM;
 
 // Caminho do arquivo de configuracao de trajetorias.
 const string ARQUIVO_TRAJETORIAS = "assets/trajetorias.txt";
@@ -993,8 +1002,11 @@ static void desenhaCrosshair(float aspect) {
     if (programaCrosshair == 0) return;
     glUseProgram(programaCrosshair);
     glUniform1f(glGetUniformLocation(programaCrosshair, "aspect"), aspect);
-    // Roxo em modo edicao, branco em navegacao normal.
-    const vec3 cor = modoEdicao ? vec3(0.7f, 0.2f, 1.0f) : vec3(1.0f);
+    // Ciano em modo de transformacao manual (R/G/K), roxo em modo edicao
+    // de trajetoria (N), branco em navegacao normal.
+    vec3 cor = vec3(1.0f);
+    if      (modoTransform != ModoTransformacao::NENHUM) cor = vec3(0.2f, 0.9f, 0.9f);
+    else if (modoEdicao)                                 cor = vec3(0.7f, 0.2f, 1.0f);
     glUniform3fv(glGetUniformLocation(programaCrosshair, "cor"), 1, value_ptr(cor));
     glDisable(GL_DEPTH_TEST);
     glLineWidth(2.0f);
@@ -1058,7 +1070,54 @@ static void plantarArvore(GLuint vaoArv, int nVertArv, GLuint texArv,
 // Callbacks GLFW
 // -------------------------------------------------------------
 
-static void key_callback(GLFWwindow* window, int key, int, int action, int) {
+// Aplica a transformacao manual (translacao / rotacao / escala) ao objeto
+// selecionado, conforme o modo ativo (R/G/K). Portado do Desafio do Modulo
+// 3: X/Y/Z agem no eixo correspondente, Shift inverte o sentido e +/-
+// escalam de forma uniforme. Atende PRESS e REPEAT (segurar a tecla).
+static void aplicarTransformacao(int key, int mods) {
+    if (objetos.empty()) return;
+    Objeto3D& obj = objetos[objetoSelecionado];
+
+    const float dir  = (mods & GLFW_MOD_SHIFT) ? -1.0f : 1.0f;
+    const float tStp = 0.1f;   // passo de translacao (unidades)
+    const float rStp = 5.0f;   // passo de rotacao (graus)
+    const float sStp = 0.1f;   // passo de escala
+    const float sMin = 0.05f;  // escala minima (evita inverter/zerar)
+
+    if (modoTransform == ModoTransformacao::TRANSLACAO) {
+        if      (key == GLFW_KEY_X) obj.posicao.x += dir * tStp;
+        else if (key == GLFW_KEY_Y) obj.posicao.y += dir * tStp;
+        else if (key == GLFW_KEY_Z) obj.posicao.z += dir * tStp;
+    }
+    else if (modoTransform == ModoTransformacao::ROTACAO) {
+        if      (key == GLFW_KEY_X) obj.rotacao.x += dir * rStp;
+        else if (key == GLFW_KEY_Y) obj.rotacao.y += dir * rStp;
+        else if (key == GLFW_KEY_Z) obj.rotacao.z += dir * rStp;
+    }
+    else if (modoTransform == ModoTransformacao::ESCALA) {
+        if      (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD)      obj.escala += vec3(sStp);
+        else if (key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) obj.escala -= vec3(sStp);
+        else if (key == GLFW_KEY_X) obj.escala.x += dir * sStp;
+        else if (key == GLFW_KEY_Y) obj.escala.y += dir * sStp;
+        else if (key == GLFW_KEY_Z) obj.escala.z += dir * sStp;
+        obj.escala = glm::max(obj.escala, vec3(sMin));
+    }
+}
+
+static void key_callback(GLFWwindow* window, int key, int, int action, int mods) {
+    // Transformacao manual (R/G/K ativos): aceita PRESS e REPEAT para
+    // permitir ajuste continuo segurando X/Y/Z ou +/-.
+    if ((action == GLFW_PRESS || action == GLFW_REPEAT) &&
+        modoTransform != ModoTransformacao::NENHUM) {
+        switch (key) {
+            case GLFW_KEY_X: case GLFW_KEY_Y: case GLFW_KEY_Z:
+            case GLFW_KEY_EQUAL: case GLFW_KEY_KP_ADD:
+            case GLFW_KEY_MINUS: case GLFW_KEY_KP_SUBTRACT:
+                aplicarTransformacao(key, mods);
+                return;
+        }
+    }
+
     if (action != GLFW_PRESS) return;
 
     if (key == GLFW_KEY_ESCAPE) { glfwSetWindowShouldClose(window, true); return; }
@@ -1085,6 +1144,37 @@ static void key_callback(GLFWwindow* window, int key, int, int action, int) {
         selecionarProximoEditavel();
         return;
     }
+
+    // --- Modos de transformacao manual (Desafio do Modulo 3) ---
+    // Pressionar a tecla do modo ativo de novo desliga (volta a navegacao).
+    if (key == GLFW_KEY_R) {
+        modoTransform = (modoTransform == ModoTransformacao::ROTACAO)
+                      ? ModoTransformacao::NENHUM : ModoTransformacao::ROTACAO;
+        cout << "Modo manual: "
+             << (modoTransform == ModoTransformacao::ROTACAO
+                 ? "ROTACAO (X/Y/Z giram o objeto, Shift inverte)" : "NENHUM")
+             << endl;
+        return;
+    }
+    if (key == GLFW_KEY_G) {
+        modoTransform = (modoTransform == ModoTransformacao::TRANSLACAO)
+                      ? ModoTransformacao::NENHUM : ModoTransformacao::TRANSLACAO;
+        cout << "Modo manual: "
+             << (modoTransform == ModoTransformacao::TRANSLACAO
+                 ? "TRANSLACAO (X/Y/Z movem o objeto, Shift inverte)" : "NENHUM")
+             << endl;
+        return;
+    }
+    if (key == GLFW_KEY_K) {
+        modoTransform = (modoTransform == ModoTransformacao::ESCALA)
+                      ? ModoTransformacao::NENHUM : ModoTransformacao::ESCALA;
+        cout << "Modo manual: "
+             << (modoTransform == ModoTransformacao::ESCALA
+                 ? "ESCALA (X/Y/Z por eixo, +/- uniforme, Shift inverte)" : "NENHUM")
+             << endl;
+        return;
+    }
+
     if (key == GLFW_KEY_N) {
         modoEdicao = !modoEdicao;
         cout << "Modo edicao " << (modoEdicao ? "ATIVADO (cruz roxa)"
@@ -1202,6 +1292,11 @@ int main() {
     cout << "M          : wireframe | ESC: sair" << endl;
     cout << "-- Manuseio de objetos (trajetorias) --" << endl;
     cout << "TAB        : selecionar proximo objeto (caixa / arvores / lua)" << endl;
+    cout << "-- Transformacao manual do selecionado (Modulo 3) --" << endl;
+    cout << "R / G / K  : modo ROTACAO / TRANSLACAO / ESCALA on-off (cruz ciano)" << endl;
+    cout << "X / Y / Z  : aplica no eixo (Shift = sentido negativo)" << endl;
+    cout << "+ / -      : escala uniforme (no modo escala)" << endl;
+    cout << "-- Trajetorias --" << endl;
     cout << "N          : modo edicao on/off (cruz central fica roxa)" << endl;
     cout << "P          : adicionar ponto na posicao da camera (modo edicao)" << endl;
     cout << "C          : limpar trajetoria do selecionado" << endl;
