@@ -237,8 +237,17 @@ const string ARQUIVO_TRAJETORIAS = "assets/trajetorias.txt";
 GLuint programaTraj   = 0;
 GLuint vaoTraj        = 0;
 GLuint vboTraj        = 0;
-int    capacidadeTraj = 0;     // numero de vec3 atualmente no VBO
-bool   trajCurva      = false; // VBO atual e uma curva amostrada (Bezier)?
+int    capacidadeTraj = 0;     // numero de vec3 atualmente no VBO (linha)
+bool   trajCurva      = false; // VBO da linha e uma curva amostrada (Bezier)?
+
+// VAO/VBO dedicado aos PONTOS DE CONTROLE (marcadores magenta). Mantido
+// separado do VBO da linha porque, no modo Bezier, a linha guarda a curva
+// AMOSTRADA, mas os marcadores precisam cair exatamente sobre os pontos de
+// controle editados pelo usuario (P) — assim da para ver a curva sendo
+// recalculada passando por cada novo ponto.
+GLuint vaoTrajPts      = 0;
+GLuint vboTrajPts      = 0;
+int    nPontosControle = 0;
 
 // A camera e o "tempo" precisam ser globais por causa dos callbacks
 // de GLFW (que sao funcoes livres).
@@ -848,10 +857,28 @@ static void uploadTrajetoriaVBO(const Trajetoria& tr) {
         glEnableVertexAttribArray(0);
         glBindVertexArray(0);
     }
-    if (tr.pontos.empty()) { capacidadeTraj = 0; return; }
+    if (tr.pontos.empty()) { capacidadeTraj = 0; nPontosControle = 0; return; }
 
-    // Linear: o VBO recebe os proprios pontos de controle. Bezier: o
-    // VBO recebe a curva AMOSTRADA (varios pontos por segmento), para
+    // VBO dos pontos de controle (marcadores): sempre os pontos crus, em
+    // qualquer modo. Atualizado a cada P/C/L para refletir a edicao.
+    if (vaoTrajPts == 0) {
+        glGenVertexArrays(1, &vaoTrajPts);
+        glGenBuffers     (1, &vboTrajPts);
+        glBindVertexArray(vaoTrajPts);
+        glBindBuffer(GL_ARRAY_BUFFER, vboTrajPts);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vec3), (void*)0);
+        glEnableVertexAttribArray(0);
+        glBindVertexArray(0);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, vboTrajPts);
+    glBufferData(GL_ARRAY_BUFFER,
+                 tr.pontos.size() * sizeof(vec3),
+                 tr.pontos.data(),
+                 GL_DYNAMIC_DRAW);
+    nPontosControle = (int)tr.pontos.size();
+
+    // Linear: o VBO da linha recebe os proprios pontos de controle. Bezier: o
+    // VBO da linha recebe a curva AMOSTRADA (varios pontos por segmento), para
     // a linha desenhada acompanhar a curva suave, e nao o poligono.
     vector<vec3> dados;
     trajCurva = (tr.bezier && (int)tr.pontos.size() >= 3);
@@ -886,17 +913,21 @@ static void desenhaTrajetoria(const mat4& view, const mat4& proj) {
     glUniformMatrix4fv(glGetUniformLocation(programaTraj, "view"), 1, GL_FALSE, value_ptr(view));
     glUniformMatrix4fv(glGetUniformLocation(programaTraj, "proj"), 1, GL_FALSE, value_ptr(proj));
 
-    glBindVertexArray(vaoTraj);
     if (capacidadeTraj >= 2) {
+        glBindVertexArray(vaoTraj);
         glUniform3f(glGetUniformLocation(programaTraj, "cor"), 1.0f, 0.85f, 0.2f);
         glDrawArrays(GL_LINE_LOOP, 0, capacidadeTraj);
     }
-    // Marcadores magenta nos pontos de controle (apenas no modo linear;
-    // na curva de Bezier o VBO contem amostras, nao pontos de controle).
-    if (!trajCurva) {
+    // Marcadores magenta SEMPRE nos pontos de controle (linear ou Bezier).
+    // Vem do VBO dedicado vaoTrajPts, que guarda os pontos crus — assim,
+    // mesmo na curva de Bezier (cuja linha e amostrada), os marcadores caem
+    // sobre os pontos editados e mostram a curva recalculada passando por
+    // cada novo ponto adicionado com P.
+    if (nPontosControle >= 1) {
+        glBindVertexArray(vaoTrajPts);
         glPointSize(10.0f);
         glUniform3f(glGetUniformLocation(programaTraj, "cor"), 1.0f, 0.2f, 0.8f);
-        glDrawArrays(GL_POINTS, 0, capacidadeTraj);
+        glDrawArrays(GL_POINTS, 0, nPontosControle);
     }
     glBindVertexArray(0);
 }
@@ -1556,6 +1587,8 @@ int main() {
     if (texMacaco) glDeleteTextures(1, &texMacaco);
     if (vboTraj)           glDeleteBuffers(1, &vboTraj);
     if (vaoTraj)           glDeleteVertexArrays(1, &vaoTraj);
+    if (vboTrajPts)        glDeleteBuffers(1, &vboTrajPts);
+    if (vaoTrajPts)        glDeleteVertexArrays(1, &vaoTrajPts);
     if (programaTraj)      glDeleteProgram(programaTraj);
     if (vboCrosshair)      glDeleteBuffers(1, &vboCrosshair);
     if (vaoCrosshair)      glDeleteVertexArrays(1, &vaoCrosshair);
