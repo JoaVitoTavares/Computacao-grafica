@@ -120,4 +120,10 @@ xhost -SI:localuser:$USER
 > python3 tools/gen_textures.py
 > ```
 
+**Referencias do conteudo**
 
+**Textura e materiais:** https://www.moodle.unisinos.br/pluginfile.php/4575688/mod_resource/content/2/M3-Aprofundamento.pdf
+
+**Camera:** https://www.moodle.unisinos.br/pluginfile.php/4575720/mod_resource/content/2/M5-Aprofundamento.pdf
+
+**Iluminaçao:** https://www.moodle.unisinos.br/pluginfile.php/4575703/mod_resource/content/2/M4-Aprofundamento.pdf
