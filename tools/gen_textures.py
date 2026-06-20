@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Gera proceduralmente as texturas usadas no projeto final.
 
-Recria, de forma reproduzível (semente fixa), as imagens que antes existiam
-apenas como binário sem fonte rastreável:
+Cria de forma binrio lua e grama:
 
   - assets/tex/grass.png  (64x64)  : grama verde com ruído + faixa de terra
   - assets/tex/moon.png   (256x256): superfície lunar cinza com crateras
@@ -81,14 +80,13 @@ def _draw_crater(px, size, cx, cy, r, rng):
             if d <= r - 1.5:
                 j = rng.randint(-6, 6)
                 px[x, y] = tuple(max(0, min(255, c + j)) for c in floor)
-            elif d <= r + 0.5:
+            elif d <=r + 0.5:
                 px[x, y] = rim
 
 
 def gen_moon(size=256):
     """Superfície lunar: base cinza ruidosa + crateras de vários tamanhos.
 
-    Cor média amostrada da original: ~(176,176,168), faixa 130..222.
     """
     rng = random.Random(SEED + 1)
     img = Image.new("RGB", (size, size))
